@@ -44,11 +44,12 @@ android {
         // Add this line to define the BuildConfig field
         // It retrieves the value from the localProperties loaded above.
         // If the property is not found, it defaults to an empty string.
-        buildConfigField(
-            "String",
-            "GEMINI_API_KEY",
-            "\"${localProperties.getProperty("GEMINI_API_KEY") ?: ""}\""
-        )
+        val geminiApiKey: String? = localProperties.getProperty("GEMINI_API_KEY")
+        if (!geminiApiKey.isNullOrEmpty()) {
+            buildConfigField("String", "GEMINI_API_KEY", "\"$geminiApiKey\"")
+        } else {
+            buildConfigField("String", "GEMINI_API_KEY", "\"YOUR_ACTUAL_GEMINI_API_KEY\"")
+        }
         // ****** END ADDITION ******
     }
 
@@ -103,6 +104,7 @@ dependencies {
     implementation("com.google.android.gms:play-services-maps:18.2.0")
     implementation("com.google.android.libraries.places:places:3.4.0")
     implementation(libs.androidx.lifecycle.runtime.ktx)
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
     implementation(libs.androidx.activity.compose)
     implementation("androidx.navigation:navigation-compose:2.7.7")
     implementation(platform(libs.androidx.compose.bom))
@@ -110,6 +112,13 @@ dependencies {
     implementation(libs.androidx.ui.graphics)
     implementation(libs.androidx.ui.tooling.preview)
     implementation(libs.androidx.material3)
+    
+    // Gemini AI dependencies
+    implementation("com.google.ai.client.generativeai:generativeai:0.7.0")
+    
+    // Coroutines for asynchronous operations
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")
+    
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
@@ -122,5 +131,12 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:1.3.1")
     implementation("androidx.camera:camera-view:1.3.1")
     implementation("androidx.camera:camera-extensions:1.3.1")
+    
+    // ML Kit for real pose detection
+    implementation("com.google.mlkit:pose-detection:18.0.0-beta3")
+    
+
+    
+
 }
 
