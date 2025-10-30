@@ -19,3 +19,22 @@
 # If you keep the line number information, uncomment this to
 # hide the original source file name.
 #-renamesourcefileattribute SourceFile
+
+# ML Kit Pose Detection rules
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.** { *; }
+
+# Keep native methods for ML Kit
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+# Preserve annotations for ML Kit
+-keepattributes *Annotation*
+-keepattributes Signature
+-keepattributes InnerClasses
+-keepattributes EnclosingMethod
+
+# 16KB page size compatibility
+-keep class com.google.mlkit.vision.** { *; }
+-keep class com.google.android.gms.vision.** { *; }

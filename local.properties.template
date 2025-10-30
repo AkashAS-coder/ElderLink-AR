@@ -1,0 +1,13 @@
+# Template for local.properties
+# Copy this file to local.properties and fill in your actual values
+
+# Your Google Gemini API key
+# Get it from: https://makersuite.google.com/app/apikey
+GEMINI_API_KEY=your_actual_gemini_api_key_here
+
+# Optional: Firebase configuration
+# If you're using Firebase Remote Config, you can leave this as is
+# The app will automatically detect and use Firebase if available
+
+# Note: Never commit local.properties to version control
+# This file should be in your .gitignore

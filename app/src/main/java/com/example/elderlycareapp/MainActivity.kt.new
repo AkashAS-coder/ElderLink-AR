@@ -1,0 +1,488 @@
+package com.example.elderlycareapp
+
+import android.Manifest
+import android.app.AlarmManager
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.app.PendingIntent
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.Intent
+import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.media.Image
+import android.os.Build
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
+import android.speech.RecognizerIntent
+import android.speech.tts.TextToSpeech
+import android.util.Log
+import android.widget.Toast
+import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.annotation.RequiresApi
+import androidx.camera.core.*
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.*
+import androidx.compose.material3.*
+import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.app.NotificationCompat
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.LifecycleOwner
+import androidx.navigation.NavController
+import androidx.navigation.NavHostController
+import androidx.navigation.compose.NavHost
+import androidx.navigation.compose.composable
+import androidx.navigation.compose.rememberNavController
+import com.example.elderlycareapp.ui.screens.CameraScreen
+import com.example.elderlycareapp.ui.screens.CompanionChatbotScreen
+import com.example.elderlycareapp.ui.screens.ExerciseChatbotScreen
+import com.example.elderlycareapp.ui.screens.HomeScreen
+import kotlinx.coroutines.*
+import java.nio.ByteBuffer
+import java.text.SimpleDateFormat
+import java.util.*
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
+
+// Constants
+private const val CHANNEL_ID = "elderly_care_reminders"
+private const val NOTIFICATION_ID = 1
+private const val TAG = "ElderlyCareApp"
+
+// Navigation destinations
+object AppDestinations {
+    const val HOME = "home"
+    const val EXERCISE_CHATBOT = "exercise_chatbot"
+    const val COMPANION_CHATBOT = "companion_chatbot"
+    const val CAMERA = "camera"
+}
+
+// Data classes
+data class ChatMessage(
+    val text: String,
+    val isUser: Boolean,
+    val timestamp: Long = System.currentTimeMillis()
+) {
+    companion object {
+        fun userMessage(text: String) = ChatMessage(text, true)
+        fun aiMessage(text: String) = ChatMessage(text, false)
+    }
+}
+
+class ExerciseSession(
+    val id: String = UUID.randomUUID().toString(),
+    val startTime: Long = System.currentTimeMillis(),
+    var endTime: Long? = null,
+    val exerciseType: String = "General",
+    private val feedbackList: MutableList<String> = mutableListOf()
+) {
+    val duration: Long
+        get() = (endTime ?: System.currentTimeMillis()) - startTime
+
+    val feedback: List<String>
+        get() = feedbackList.toList()
+
+    fun addFeedback(feedback: String) {
+        feedbackList.add(feedback)
+    }
+
+    fun complete() {
+        endTime = System.currentTimeMillis()
+    }
+}
+
+/**
+ * Main activity for the Elderly Care application.
+ */
+class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
+    // Text-to-speech
+    private lateinit var tts: TextToSpeech
+    private var currentTtsPitch = 1.0f
+    private var currentTtsRate = 1.0f
+
+    // Camera components
+    private val cameraExecutor: ExecutorService = Executors.newSingleThreadExecutor()
+    private var imageCapture: ImageCapture? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var preview: Preview? = null
+    private var imageAnalyzer: ImageAnalysis? = null
+    private var cameraInstance: Camera? = null
+    private var analysisActive = false
+    private var lastAnalysisTime = 0L
+    private val analysisInterval = 1000L // 1 second between analyses
+
+    // Exercise session
+    private var currentExerciseSession: ExerciseSession? = null
+    
+    // Chat state
+    val chatMessages = mutableStateListOf<ChatMessage>()
+    var isProcessing by mutableStateOf(false)
+        private set
+    var initialPrompt by mutableStateOf("")
+        private set
+
+    // UI state
+    var isExerciseInProgress by mutableStateOf(false)
+        private set
+    var analysisResultText by mutableStateOf("")
+        private set
+    var currentFeedback by mutableStateOf("")
+        private set
+
+    // Coroutine scope
+    private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    // Notification and reminder constants
+    private val REMINDER_REQUEST_CODE = 1001
+
+    // Broadcast receiver for reminders
+    private val reminderReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                "com.example.elderlycareapp.REMINDER_ACTION" -> {
+                    showReminderNotification()
+                }
+            }
+        }
+    }
+
+    // Request code for camera permission
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            startCamera()
+        } else {
+            Toast.makeText(
+                this,
+                "Camera permission is required to use this feature",
+                Toast.LENGTH_SHORT
+            ).show()
+        }
+    }
+
+    // Text to Speech initialization
+    override fun onInit(status: Int) {
+        if (status == TextToSpeech.SUCCESS) {
+            val result = tts.setLanguage(Locale.getDefault())
+            if (result == TextToSpeech.LANG_MISSING_DATA ||
+                result == TextToSpeech.LANG_NOT_SUPPORTED
+            ) {
+                Log.e(TAG, "Language not supported")
+            }
+        } else {
+            Log.e(TAG, "Initialization failed")
+        }
+    }
+
+    // Speak text using TextToSpeech
+    fun speak(text: String, pitch: Float? = null, rate: Float? = null) {
+        if (::tts.isInitialized) {
+            tts.pitch = pitch ?: currentTtsPitch
+            tts.speechRate = rate ?: currentTtsRate
+            tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, null)
+        }
+    }
+
+    // Speak AI response with appropriate settings
+    fun speakAIResponse(text: String, isExerciseInstruction: Boolean = false) {
+        val pitch = if (isExerciseInstruction) 1.1f else 1.0f
+        val rate = if (isExerciseInstruction) 0.9f else 1.0f
+        speak(text, pitch, rate)
+    }
+
+    // Stop speaking
+    fun stopSpeaking() {
+        if (::tts.isInitialized) {
+            tts.stop()
+        }
+    }
+
+    // Check if currently speaking
+    fun isSpeaking(): Boolean {
+        return if (::tts.isInitialized) tts.isSpeaking else false
+    }
+
+    // Start a new exercise session
+    fun startExerciseSession(exerciseType: String) {
+        currentExerciseSession = ExerciseSession(exerciseType = exerciseType)
+        isExerciseInProgress = true
+        analysisResultText = ""
+        currentFeedback = ""
+    }
+
+    // End the current exercise session
+    fun endExerciseSession() {
+        currentExerciseSession?.let { session ->
+            session.complete()
+            // Save session to database or storage
+            isExerciseInProgress = false
+            analysisResultText = ""
+            currentFeedback = ""
+        }
+    }
+
+    // Log feedback for the current exercise session
+    fun logExerciseFeedback(feedback: String) {
+        currentExerciseSession?.addFeedback(feedback)
+        currentFeedback = feedback
+    }
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Initialize TextToSpeech
+        tts = TextToSpeech(this, this)
+
+        // Create notification channel
+        createNotificationChannel()
+
+        setContent {
+            MaterialTheme {
+                val navController = rememberNavController()
+                
+                NavHost(
+                    navController = navController,
+                    startDestination = AppDestinations.HOME
+                ) {
+                    composable(AppDestinations.HOME) {
+                        HomeScreen(
+                            navController = navController,
+                            onStartExercise = { exerciseType ->
+                                startExerciseSession(exerciseType)
+                                navController.navigate(AppDestinations.EXERCISE_CHATBOT)
+                            },
+                            onCompanionChat = {
+                                navController.navigate(AppDestinations.COMPANION_CHATBOT)
+                            },
+                            onOpenCamera = {
+                                if (checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+                                    navController.navigate(AppDestinations.CAMERA)
+                                } else {
+                                    requestPermissionLauncher.launch(Manifest.permission.CAMERA)
+                                }
+                            }
+                        )
+                    }
+                    
+                    composable(AppDestinations.EXERCISE_CHATBOT) {
+                        ExerciseChatbotScreen(
+                            navController = navController,
+                            activity = this@MainActivity,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+                    
+                    composable(AppDestinations.COMPANION_CHATBOT) {
+                        CompanionChatbotScreen(
+                            navController = navController,
+                            activity = this@MainActivity,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+                    
+                    composable(AppDestinations.CAMERA) {
+                        CameraScreen(
+                            navController = navController,
+                            onBack = { navController.popBackStack() }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private fun createNotificationChannel() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val name = "Exercise Reminders"
+            val descriptionText = "Channel for exercise reminder notifications"
+            val importance = NotificationManager.IMPORTANCE_DEFAULT
+            
+            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+                description = descriptionText
+            }
+            
+            val notificationManager = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+
+    @RequiresApi(Build.VERSION_CODES.M)
+    private fun scheduleReminder(hour: Int, minute: Int, requestCode: Int) {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as? AlarmManager
+        if (alarmManager == null) {
+            Log.e(TAG, "AlarmManager is not available")
+            return
+        }
+
+        val intent = Intent(this, ReminderReceiver::class.java).apply {
+            action = "com.example.elderlycareapp.REMINDER_ACTION"
+            putExtra("requestCode", requestCode)
+        }
+        
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            
+            // If the time has already passed today, set it for tomorrow
+            if (timeInMillis <= System.currentTimeMillis()) {
+                add(Calendar.DAY_OF_YEAR, 1)
+            }
+        }
+        
+        val pendingIntent = PendingIntent.getBroadcast(
+            this,
+            requestCode,
+            intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+        
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                alarmManager.setExactAndAllowWhileIdle(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    pendingIntent
+                )
+            } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                alarmManager.setExact(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    pendingIntent
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                alarmManager.set(
+                    AlarmManager.RTC_WAKEUP,
+                    calendar.timeInMillis,
+                    pendingIntent
+                )
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error scheduling reminder: ${e.message}")
+        }
+    }
+
+    suspend fun sendMessage(
+        message: String,
+        chatMessages: MutableList<ChatMessage>,
+        coroutineScope: CoroutineScope,
+        activity: MainActivity,
+        onComplete: () -> Unit
+    ) {
+        // Add user message
+        chatMessages.add(ChatMessage.userMessage(message))
+
+        // Get AI response
+        val response = getGeminiResponse(message)
+        chatMessages.add(ChatMessage.aiMessage(response))
+
+        // Speak the response
+        activity.speakAIResponse(response)
+
+        onComplete()
+    }
+
+    private suspend fun getGeminiResponse(
+        message: String,
+        conversationId: String = "default",
+        context: String = ""
+    ): String {
+        // In a real app, this would call the Gemini API
+        // For now, return a mock response
+        delay(1000) // Simulate network delay
+        return "I'm your AI assistant. You said: $message"
+    }
+
+    // Broadcast receiver for handling reminders
+    class ReminderReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            when (intent.action) {
+                "com.example.elderlycareapp.REMINDER_ACTION" -> {
+                    // Show notification
+                    val notificationManager = NotificationManagerCompat.from(context)
+                    
+                    val builder = NotificationCompat.Builder(context, CHANNEL_ID)
+                        .setSmallIcon(android.R.drawable.ic_dialog_info)
+                        .setContentTitle("Elderly Care Reminder")
+                        .setContentText("Time for your daily check-in!")
+                        .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                        .setAutoCancel(true)
+                    
+                    try {
+                        notificationManager.notify(NOTIFICATION_ID, builder.build())
+                    } catch (e: SecurityException) {
+                        Log.e("ReminderReceiver", "SecurityException on notify: ${e.message}")
+                    }
+                }
+            }
+        }
+    }
+
+    private fun showReminderNotification() {
+        try {
+            val builder = NotificationCompat.Builder(this, CHANNEL_ID)
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setContentTitle("Elderly Care Reminder")
+                .setContentText("Time for your daily check-in or exercise!")
+                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                .setAutoCancel(true)
+
+            val notificationManager = NotificationManagerCompat.from(this)
+            if (notificationManager.areNotificationsEnabled()) {
+                notificationManager.notify(NOTIFICATION_ID, builder.build())
+            } else {
+                Log.w(TAG, "Notifications are disabled")
+            }
+        } catch (e: Exception) {
+            Log.e(TAG, "Error showing notification: ${e.message}")
+        }
+    }
+
+    private fun startCamera() {
+        // Implement camera initialization
+    }
+
+    private fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap? {
+        val planeProxy = imageProxy.planes[0]
+        val buffer: ByteBuffer = planeProxy.buffer
+        val bytes = ByteArray(buffer.remaining())
+        buffer.get(bytes)
+        return BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        // Shut down the coroutine scope
+        coroutineScope.cancel()
+        
+        // Shut down text-to-speech
+        if (::tts.isInitialized) {
+            tts.stop()
+            tts.shutdown()
+        }
+        
+        // Shut down the camera
+        cameraExecutor.shutdown()
+    }
+}

@@ -1,0 +1,432 @@
+package com.example.elderlycareapp.ui.screens
+
+import android.Manifest
+import android.app.NotificationChannel
+import android.app.NotificationManager
+import android.content.Context
+import android.content.pm.PackageManager
+import android.os.Build
+import android.util.Log
+import android.util.Size
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.camera.core.Camera
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.ImageProxy
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Camera
+import androidx.compose.material.icons.filled.Cameraswitch
+import androidx.compose.material.icons.filled.PlayArrow
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material3.Button
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Scaffold
+import androidx.compose.material3.SnackbarHost
+import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.app.NotificationCompat
+import androidx.core.content.ContextCompat
+import androidx.navigation.NavController
+import kotlinx.coroutines.launch
+import java.util.concurrent.Executors
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CameraScreen(
+    navController: NavController,
+    onBack: () -> Unit,
+    onCapture: (ImageProxy) -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    val scope = rememberCoroutineScope()
+
+    var hasCamPermission by remember {
+        mutableStateOf(
+            ContextCompat.checkSelfPermission(
+                context,
+                Manifest.permission.CAMERA
+            ) == PackageManager.PERMISSION_GRANTED
+        )
+    }
+    
+    var permissionRequested by remember { mutableStateOf(false) }
+    var isAnalyzing by remember { mutableStateOf(false) }
+    var cameraSelector by remember { 
+        mutableStateOf(CameraSelector.DEFAULT_BACK_CAMERA) 
+    }
+
+    // Permission launcher
+    val launcher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        hasCamPermission = granted
+    }
+
+    LaunchedEffect(Unit) {
+        if (!hasCamPermission) {
+            launcher.launch(Manifest.permission.CAMERA)
+        } else {
+            permissionRequested = true
+        }
+    }
+
+    val previewView = remember { 
+        PreviewView(context).apply {
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+            scaleType = PreviewView.ScaleType.FILL_CENTER
+        }
+    }
+    
+    // Camera state
+    var camera by remember { mutableStateOf<Camera?>(null) }
+    var imageCapture by remember { mutableStateOf<ImageCapture?>(null) }
+    var imageAnalyzer by remember { mutableStateOf<ImageAnalysis?>(null) }
+    var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
+    var flashEnabled by remember { mutableStateOf(false) }
+
+    // Initialize camera
+    fun initializeCamera() {
+        if (!hasCamPermission) return
+        
+        try {
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+            cameraProvider = cameraProviderFuture.get()
+            
+            // Build and bind the camera use cases
+            val newImageCapture = ImageCapture.Builder()
+                .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                .build()
+                
+            val newImageAnalyzer = ImageAnalysis.Builder()
+                .setTargetResolution(Size(1280, 720))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .apply {
+                    setAnalyzer(cameraExecutor) { image ->
+                        if (isAnalyzing) {
+                            try {
+                                onCapture(image)
+                            } catch (e: Exception) {
+                                Log.e(TAG, "Error in image analysis", e)
+                            } finally {
+                                image.close()
+                            }
+                        } else {
+                            image.close()
+                        }
+                    }
+                }
+                
+            // Update state
+            imageCapture = newImageCapture
+            imageAnalyzer = newImageAnalyzer
+            
+            // Bind use cases to the lifecycle
+            cameraProvider?.unbindAll()
+            
+            val preview = Preview.Builder().build().also {
+                it.setSurfaceProvider(previewView.surfaceProvider)
+            }
+            
+            camera = cameraProvider?.bindToLifecycle(
+                lifecycleOwner,
+                cameraSelector,
+                preview,
+                newImageCapture,
+                newImageAnalyzer
+            )
+            
+            Log.d(TAG, "Camera initialized successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "Camera initialization failed", e)
+        }
+    }
+    
+    // Set up camera preview and analysis
+    LaunchedEffect(hasCamPermission, cameraSelector) {
+        initializeCamera()
+    }
+
+    // Notification setup
+    val notificationManager = remember { 
+        context.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager 
+    }
+    val channelId = "camera_analysis_channel"
+    val snackbarHostState = remember { SnackbarHostState() }
+    
+    // Create notification channel
+    LaunchedEffect(Unit) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            val channel = NotificationChannel(
+                channelId,
+                "Camera Analysis",
+                NotificationManager.IMPORTANCE_LOW
+            ).apply {
+                description = "Shows when camera analysis is active"
+            }
+            notificationManager.createNotificationChannel(channel)
+        }
+    }
+    
+    // Show/hide notification when analysis state changes
+    LaunchedEffect(isAnalyzing) {
+        if (isAnalyzing) {
+            val notification = NotificationCompat.Builder(context, channelId)
+                .setContentTitle("Elderly Care App")
+                .setContentText("Pose analysis is active")
+                .setSmallIcon(android.R.drawable.ic_dialog_info)
+                .setOngoing(true)
+                .build()
+            notificationManager.notify(1, notification)
+        } else {
+            notificationManager.cancel(1)
+        }
+    }
+
+    // Main UI
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        topBar = {
+            TopAppBar(
+                title = { Text("Camera") },
+                navigationIcon = {
+                    IconButton(onClick = onBack) {
+                        Icon(
+                            imageVector = Icons.Default.ArrowBack,
+                            contentDescription = "Back"
+                        )
+                    }
+                }
+            )
+        }
+    ) { padding ->
+        Surface(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(padding),
+            color = MaterialTheme.colorScheme.background
+        ) {
+            if (hasCamPermission) {
+                // Camera preview with capture button overlay
+                Box(
+                    modifier = Modifier.fillMaxSize()
+                ) {
+                    // Camera preview
+                    AndroidView(
+                        factory = { previewView },
+                        modifier = Modifier.fillMaxSize()
+                    )
+                    
+                    // Controls container
+                    Box(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(bottom = 32.dp),
+                        contentAlignment = Alignment.BottomCenter
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(horizontal = 16.dp, vertical = 16.dp),
+                            horizontalArrangement = Arrangement.SpaceEvenly,
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            // Flip camera button
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                IconButton(
+                                    onClick = {
+                                        cameraSelector = if (cameraSelector == CameraSelector.DEFAULT_BACK_CAMERA) {
+                                            CameraSelector.DEFAULT_FRONT_CAMERA
+                                        } else {
+                                            CameraSelector.DEFAULT_BACK_CAMERA
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .background(
+                                            MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                            CircleShape
+                                        )
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Cameraswitch,
+                                        contentDescription = "Flip Camera",
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                                Text(
+                                    text = "Flip",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            
+                            // Capture button
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                Button(
+                                    onClick = {
+                                        val currentImageCapture = imageCapture ?: return@Button
+                                        currentImageCapture.takePicture(cameraExecutor, object : ImageCapture.OnImageCapturedCallback() {
+                                            override fun onCaptureSuccess(image: ImageProxy) {
+                                                onCapture(image)
+                                            }
+
+                                            override fun onError(exception: ImageCaptureException) {
+                                                Log.e(TAG, "Image capture failed", exception)
+                                            }
+                                        })
+                                    },
+                                    modifier = Modifier.size(72.dp),
+                                    enabled = !isAnalyzing
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Camera,
+                                        contentDescription = "Take Photo"
+                                    )
+                                }
+                                Text(
+                                    text = "Capture",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                            
+                            // Analysis toggle button
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.spacedBy(4.dp)
+                            ) {
+                                if (isAnalyzing) {
+                                    Text(
+                                        text = "Analyzing...",
+                                        color = MaterialTheme.colorScheme.primary,
+                                        style = MaterialTheme.typography.labelSmall
+                                    )
+                                } else {
+                                    Spacer(modifier = Modifier.height(20.dp))
+                                }
+                                
+                                IconButton(
+                                    onClick = {
+                                        isAnalyzing = !isAnalyzing
+                                        scope.launch {
+                                            snackbarHostState.showSnackbar(
+                                                if (isAnalyzing) "Analysis started" else "Analysis stopped"
+                                            )
+                                        }
+                                    },
+                                    modifier = Modifier
+                                        .size(56.dp)
+                                        .background(
+                                            if (isAnalyzing) 
+                                                MaterialTheme.colorScheme.primaryContainer 
+                                            else 
+                                                MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.7f),
+                                            CircleShape
+                                        )
+                                ) {
+                                    Icon(
+                                        imageVector = if (isAnalyzing) Icons.Default.Stop else Icons.Default.PlayArrow,
+                                        contentDescription = if (isAnalyzing) "Stop Analysis" else "Start Analysis",
+                                        tint = if (isAnalyzing) 
+                                            MaterialTheme.colorScheme.onPrimaryContainer 
+                                        else 
+                                            MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.size(32.dp)
+                                    )
+                                }
+                                
+                                Text(
+                                    text = if (isAnalyzing) "Stop" else "Analyze",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                            }
+                        }
+                    }
+                }
+            } else {
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .background(Color.Black),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center
+                ) {
+                    Text(
+                        text = "Camera permission required",
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    Button(onClick = { launcher.launch(Manifest.permission.CAMERA) }) {
+                        Text("Request Permission")
+                    }
+                }
+            }
+        }
+    }
+
+    // Clean up on dispose
+    DisposableEffect(Unit) {
+        onDispose {
+            try {
+                cameraExecutor.shutdown()
+                imageAnalyzer?.clearAnalyzer()
+                cameraProvider?.unbindAll()
+                Log.d(TAG, "Camera resources released")
+            } catch (e: Exception) {
+                Log.e(TAG, "Error cleaning up camera resources", e)
+            }
+        }
+    }
+}
+
+private const val TAG = "CameraScreen"

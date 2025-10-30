@@ -1,201 +1,219 @@
-@file:OptIn(ExperimentalMaterial3Api::class)
-
 package com.example.elderlycareapp
 
 import android.Manifest
-import android.annotation.SuppressLint
 import android.app.AlarmManager
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
+import android.content.pm.PackageManager
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
 import android.graphics.Matrix
 import android.graphics.Rect
-import android.graphics.YuvImage
+import android.media.Image
 import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.ComponentActivity
-import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
+import androidx.compose.foundation.layout.*
+import androidx.compose.material.*
+import androidx.camera.core.*
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.*
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.KeyboardOptions
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.*
-import androidx.compose.material3.DropdownMenu
-import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.*
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.core.app.NotificationManagerCompat
 import androidx.compose.ui.platform.LocalContext
-import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.ui.text.input.KeyboardType
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.compose.ui.window.Dialog
 import androidx.core.app.ActivityCompat
 import androidx.core.app.NotificationCompat
-import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
-import androidx.navigation.NavHostController
+import androidx.core.content.PermissionChecker
+import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
-
-import kotlinx.coroutines.CoroutineScope
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
-import okhttp3.Call
-import okhttp3.Callback
-import okhttp3.MediaType.Companion.toMediaType
-import okhttp3.OkHttpClient
-import okhttp3.Request
-import okhttp3.RequestBody.Companion.toRequestBody
-import okhttp3.Response
-import org.json.JSONException
-import org.json.JSONObject
+import androidx.navigation.navArgument
+import com.example.elderlycareapp.model.ChatMessage
+import com.example.elderlycareapp.model.ExerciseSession
+import com.example.elderlycareapp.ui.screens.CameraScreen
+import com.example.elderlycareapp.ui.screens.CompanionChatbotScreen
+import com.example.elderlycareapp.ui.screens.ExerciseChatbotScreen
+import com.example.elderlycareapp.ui.screens.HomeScreen
+import kotlinx.coroutines.*
 import java.io.ByteArrayOutputStream
-import java.io.IOException
-import java.util.Calendar
-import java.util.Locale
+import java.util.*
+import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
 
+private const val TAG = "ElderlyCareApp"
+
+// Navigation destinations
 object AppDestinations {
     const val HOME = "home"
     const val EXERCISE_CHATBOT = "exercise_chatbot"
     const val COMPANION_CHATBOT = "companion_chatbot"
-    const val CAMERA = "camera"
+    const val CAMERA = "camera/{exerciseType}"
+    
+    fun getCameraRoute(exerciseType: String = "default"): String {
+        return "camera/$exerciseType"
+    }
 }
 
-private val sharedOkHttpClient = OkHttpClient()
+// Data classes
+class ExerciseSession(
+    val id: String = UUID.randomUUID().toString(),
+    val startTime: Long = System.currentTimeMillis(),
+    var endTime: Long? = null,
+    val exerciseType: String = "General",
+    private val feedbackList: MutableList<String> = mutableListOf()
+) {
+    val duration: Long
+        get() = (endTime ?: System.currentTimeMillis()) - startTime
 
-data class ChatMessage(
-    val text: String,
-    val isUser: Boolean
-)
+    val feedback: List<String>
+        get() = feedbackList.toList()
 
-class MyImageAnalyzer(
-    private val onFrameAnalyzed: (String) -> Unit,
-    private val onGeminiAnalysis: ((Bitmap) -> Unit)? = null,
-    private val isAnalysisActive: Boolean = false
-) : ImageAnalysis.Analyzer {
-    @SuppressLint("UnsafeOptInUsageError")
-    override fun analyze(imageProxy: ImageProxy) {
-        Log.d("MyImageAnalyzer", "=== IMAGE ANALYZER CALLED ===")
-        Log.d("MyImageAnalyzer", "Image timestamp: ${imageProxy.imageInfo.timestamp}")
-        Log.d("MyImageAnalyzer", "Image rotation: ${imageProxy.imageInfo.rotationDegrees}")
-        
-        val image = imageProxy.image
-        if (image != null) {
-            Log.d("MyImageAnalyzer", "Image dimensions: ${image.width}x${image.height}")
-            val analysisResult = "Timestamp: ${imageProxy.imageInfo.timestamp}, " +
-                    "Rotation: ${imageProxy.imageInfo.rotationDegrees}, " +
-                    "Width: ${image.width}, Height: ${image.height}"
-            onFrameAnalyzed(analysisResult)
-            
-            Log.d("MyImageAnalyzer", "isAnalysisActive: $isAnalysisActive")
-            Log.d("MyImageAnalyzer", "onGeminiAnalysis callback is null: ${onGeminiAnalysis == null}")
-            
-            // Send frame to Gemini AI for analysis if active
-            if (isAnalysisActive && onGeminiAnalysis != null) {
-                try {
-                    Log.d("MyImageAnalyzer", "Converting frame to bitmap for Gemini analysis...")
-                    val bitmap = imageProxyToBitmap(imageProxy)
-                    Log.d("MyImageAnalyzer", "Bitmap created: ${bitmap.width}x${bitmap.height}")
-                    Log.d("MyImageAnalyzer", "Calling onGeminiAnalysis callback...")
-                    onGeminiAnalysis?.invoke(bitmap)
-                    Log.d("MyImageAnalyzer", "onGeminiAnalysis callback completed")
-                } catch (e: Exception) {
-                    Log.e("MyImageAnalyzer", "Error converting image to bitmap", e)
-                }
-            } else if (isAnalysisActive) {
-                Log.d("MyImageAnalyzer", "Analysis active but callback is null")
-            } else {
-                Log.d("MyImageAnalyzer", "Analysis not active, skipping Gemini analysis")
-            }
-        } else {
-            Log.d("MyImageAnalyzer", "Image is null, skipping analysis")
-        }
-        imageProxy.close()
+    val isCompleted: Boolean
+        get() = endTime != null
+
+    fun addFeedback(feedback: String) {
+        feedbackList.add(feedback)
+    }
+
+    fun complete() {
+        endTime = System.currentTimeMillis()
     }
 }
 
 class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
 
-    companion object {
-        const val CHANNEL_ID = "reminder_channel"
-        const val NOTIFICATION_ID = 101
-        const val REMINDER_REQUEST_CODE = 1001
+    // Text-to-speech
+    private lateinit var tts: TextToSpeech
+    private var currentTtsPitch = 0.9f  // Slightly lower pitch for elderly users
+    private var currentTtsRate = 0.7f  // Slower rate for better comprehension
+
+    // Camera and Pose Analysis
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var poseAnalyzer: PoseAnalyzer
+    private var currentExerciseType: String? = null
+    private var cameraProvider: ProcessCameraProvider? = null
+
+    // Camera state
+    private var imageCapture: ImageCapture? = null
+    private var imageAnalyzer: ImageAnalysis? = null
+    private var preview: Preview? = null
+    private var camera: Camera? = null
+    private lateinit var previewView: androidx.camera.view.PreviewView
+
+    // Exercise
+    private var currentExerciseSession: ExerciseSession? = null
+    private var exerciseStartTime: Long = 0L
+    private val exerciseFeedback: MutableList<String> = mutableListOf()
+    private var isExerciseActive = false
+    private var showExerciseScreen by mutableStateOf(false)
+    private var currentExercise by mutableStateOf<String?>(null)
+
+    // UI state
+    private var _isExerciseInProgress = false
+    var isExerciseInProgress: Boolean
+        get() = _isExerciseInProgress
+        private set(value) {
+            _isExerciseInProgress = value
+        }
+
+    // Chat state
+    private val _chatMessages = mutableStateListOf<ChatMessage>()
+    
+    // Get messages for a specific room
+    internal fun getMessagesForRoom(roomId: String): List<ChatMessage> {
+        return _chatMessages.filter { it.roomId == roomId }
     }
 
-    private lateinit var tts: TextToSpeech
-    private lateinit var poseAnalyzer: PoseAnalyzer
-    private val coroutineScope = CoroutineScope(Dispatchers.Main)
+    // Clear chat for a specific room
+    internal fun clearChat(roomId: String) {
+        _chatMessages.removeAll { it.roomId == roomId }
+    }
+    
+    // Processing state
+    private val _isProcessing = mutableStateOf(false)
+    val isProcessing: Boolean
+        get() = _isProcessing.value
 
-    override fun onCreate(savedInstanceState: Bundle?) {
-        super.onCreate(savedInstanceState)
-        
-        // Initialize Text-to-Speech
-        tts = TextToSpeech(this, this)
-        
-        // Initialize ML Kit Pose Analyzer
-        Log.d("MainActivity", "=== INITIALIZING POSE ANALYZER ===")
-        poseAnalyzer = PoseAnalyzer(this)
-        Log.d("MainActivity", "PoseAnalyzer instance created")
-        
-        poseAnalyzer.initializePoseAnalyzer { feedback ->
-            Log.d("MainActivity", "Received feedback from pose analyzer: $feedback")
-            runOnUiThread {
-                onPoseAnalysisResult(feedback)
+    private fun setProcessing(value: Boolean) {
+        _isProcessing.value = value
+    }
+
+    internal fun startExerciseSession(exerciseType: String) {
+        currentExerciseType = exerciseType
+        exerciseStartTime = System.currentTimeMillis()
+        exerciseFeedback.clear()
+        isExerciseActive = false // Enable after countdown completes
+        showExerciseScreen = true
+        currentExerciseSession = ExerciseSession(
+            id = System.currentTimeMillis().toString(),
+            startTime = exerciseStartTime,
+            exerciseType = exerciseType
+        )
+    }
+
+    internal fun beginExerciseAnalysis() {
+        if (isExerciseActive) return
+        isExerciseActive = true
+        exerciseStartTime = System.currentTimeMillis()
+        currentExerciseType?.let { type ->
+            if (::poseAnalyzer.isInitialized) {
+                poseAnalyzer.startContinuousUpdates(type)
             }
         }
-        Log.d("MainActivity", "Pose analyzer initialization call completed")
-        
-        createNotificationChannel()
+    }
 
-        setContent {
-            MaterialTheme {
-                val navController = rememberNavController()
-                NavHost(navController = navController, startDestination = AppDestinations.HOME) {
-                    composable(AppDestinations.HOME) { HomeScreen(navController, this@MainActivity) }
-                    composable(AppDestinations.EXERCISE_CHATBOT) { ExerciseChatbotScreen(navController) }
-                    composable(AppDestinations.COMPANION_CHATBOT) { CompanionChatbotScreen(navController) }
-                    composable(AppDestinations.CAMERA) { CameraScreen(navController) }
-                }
+    internal fun endExerciseSession() {
+        currentExerciseSession?.let { session ->
+            session.complete()
+            exerciseFeedback.forEach { feedback ->
+                session.addFeedback(feedback)
             }
+            // Here you can save the session to your database
         }
+        
+        // Stop any ongoing TTS
+        stopTTS()
+        
+        // Disable continuous updates
+        if (::poseAnalyzer.isInitialized) {
+            poseAnalyzer.disableContinuousUpdates()
+        }
+
+        isExerciseActive = false
+        showExerciseScreen = false
+        currentExerciseType = null
     }
 
     private fun createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-            val name = "Reminder Notifications"
-            val descriptionText = "Channel for elderly care reminders"
+            val name = "Exercise Reminder"
+            val descriptionText = "Channel for exercise reminders"
             val importance = NotificationManager.IMPORTANCE_DEFAULT
-            val channel = NotificationChannel(CHANNEL_ID, name, importance).apply {
+            val channel = NotificationChannel("exercise_reminder", name, importance).apply {
                 description = descriptionText
             }
             val notificationManager: NotificationManager =
@@ -204,975 +222,644 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
         }
     }
 
-    fun scheduleReminder(context: Context, hour: Int, minute: Int) {
-        val alarmManager = context.getSystemService(Context.ALARM_SERVICE) as AlarmManager
-        val intent = Intent(context, ReminderReceiver::class.java)
-        val pendingIntentFlags = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        } else {
-            PendingIntent.FLAG_UPDATE_CURRENT
-        }
-        val pendingIntent = PendingIntent.getBroadcast(
-            context,
-            REMINDER_REQUEST_CODE,
-            intent,
-            pendingIntentFlags
-        )
-
-        val calendar = Calendar.getInstance().apply {
-            timeInMillis = System.currentTimeMillis()
-            set(Calendar.HOUR_OF_DAY, hour)
-            set(Calendar.MINUTE, minute)
-            set(Calendar.SECOND, 0)
-            set(Calendar.MILLISECOND, 0)
-            if (before(Calendar.getInstance())) {
-                add(Calendar.DAY_OF_YEAR, 1)
-            }
+    private fun processImageForPose(imageProxy: ImageProxy) {
+        Log.d("CameraDebug", "Processing image. isExerciseActive: $isExerciseActive")
+        
+        // Only process images when exercise is active AND analysis is enabled
+        if (!isExerciseActive) {
+            Log.d("CameraDebug", "Skipping image processing - exercise not active")
+            imageProxy.close()
+            return
         }
 
         try {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
-                if (alarmManager.canScheduleExactAlarms()) {
-                    alarmManager.setExactAndAllowWhileIdle(
-                        AlarmManager.RTC_WAKEUP,
-                        calendar.timeInMillis,
-                        pendingIntent
-                    )
-                } else {
-                    Log.w("MainActivity", "Cannot schedule exact alarms. App needs SCHEDULE_EXACT_ALARM permission and user allowance.")
-                    Toast.makeText(context, "Cannot schedule exact alarms. Please enable permission in settings.", Toast.LENGTH_LONG).show()
-                    return
+            Log.d("CameraDebug", "Converting ImageProxy to Bitmap")
+            val bitmap = imageProxy.toBitmap()
+            Log.d("CameraDebug", "Bitmap created: ${bitmap.width}x${bitmap.height}")
+
+            val exerciseTypeSafe = currentExerciseType ?: "chair_squat"
+            Log.d("CameraDebug", "Exercise type: $exerciseTypeSafe")
+
+            if (::poseAnalyzer.isInitialized) {
+                Log.d("CameraDebug", "PoseAnalyzer initialized, analyzing pose...")
+                
+                // Process the image for pose detection
+                poseAnalyzer.analyzePose(bitmap,
+                    onResult = { analysis ->
+                        Log.d("PoseFeedback", "Analysis result: ${analysis.feedback}")
+                        analysisResultText = analysis.feedback
+                    },
+                    onError = { exception ->
+                        Log.e("PoseFeedback", "Analysis error", exception)
+                    }
+                )
+                
+                // Update pose landmarks for visualization - only update if pose is detected
+                poseAnalyzer.getLastPose()?.let { pose ->
+                    val landmarks = mutableMapOf<Int, Pair<Float, Float>>()
+                    val width = bitmap.width.coerceAtLeast(1)
+                    val height = bitmap.height.coerceAtLeast(1)
+                    val widthF = width.toFloat()
+                    val heightF = height.toFloat()
+                    
+                    // Filter landmarks by visibility - extremely lenient for skeleton visualization
+                    pose.allPoseLandmarks.forEach { landmark: com.google.mlkit.vision.pose.PoseLandmark ->
+                        // Very low threshold for maximum skeleton visibility
+                        if (landmark.inFrameLikelihood > 0.05f) { // Extremely lenient
+                            val normalizedX = (landmark.position.x / widthF).coerceIn(0f, 1f)
+                            val normalizedY = (landmark.position.y / heightF).coerceIn(0f, 1f)
+                            landmarks[landmark.landmarkType] = Pair(normalizedX, normalizedY)
+                        }
+                    }
+                    
+                    // Update the camera screen with landmarks on UI thread
+                    runOnUiThread {
+                        if (landmarks.isNotEmpty()) {
+                            poseLandmarks = landmarks
+                            Log.d("PoseLandmarks", "Updated ${landmarks.size} visible landmarks")
+                        } else {
+                            Log.d("PoseLandmarks", "No visible landmarks detected")
+                        }
+                    }
                 }
             } else {
-                alarmManager.setExactAndAllowWhileIdle(
-                    AlarmManager.RTC_WAKEUP,
-                    calendar.timeInMillis,
-                    pendingIntent
-                )
+                Log.e("CameraDebug", "PoseAnalyzer not initialized")
             }
-            Toast.makeText(context, "Reminder set for ${"%02d".format(hour)}:${"%02d".format(minute)}", Toast.LENGTH_SHORT).show()
-        } catch (se: SecurityException) {
-            Log.e("MainActivity", "Failed to schedule reminder. Check SCHEDULE_EXACT_ALARM.", se)
-            Toast.makeText(context, "Could not schedule reminder. Permission issue?", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    class ReminderReceiver : BroadcastReceiver() {
-        override fun onReceive(context: Context?, intent: Intent?) {
-            context ?: return
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                if (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                    Log.w("ReminderReceiver", "POST_NOTIFICATIONS permission not granted.")
-                    return
-                }
-            }
-            val builder = NotificationCompat.Builder(context, CHANNEL_ID)
-                .setSmallIcon(R.drawable.ic_launcher_foreground) // Ensure this drawable exists
-                .setContentTitle("Elderly Care Reminder")
-                .setContentText("Time for your daily check-in or exercise!")
-                .setPriority(NotificationCompat.PRIORITY_DEFAULT)
-                .setAutoCancel(true)
-
-            with(NotificationManagerCompat.from(context)) {
-                // The permission check here is redundant if done above, but safe.
-                if (ActivityCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED &&
-                    Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                    Log.w("ReminderReceiver", "Notification permission check failed just before notify.")
-                    return
-                }
-                notify(NOTIFICATION_ID, builder.build())
-            }
-        }
-    }
-
-    private fun initializePoseAnalyzer() {
-        try {
-            poseAnalyzer = PoseAnalyzer(this)
-            Log.d("MainActivity", "Pose analyzer initialized successfully")
         } catch (e: Exception) {
-            Log.e("MainActivity", "Failed to initialize pose analyzer", e)
-            Toast.makeText(this, "Failed to initialize pose analyzer: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-    }
-
-    fun startExerciseSession(exerciseType: String) {
-        Log.d("MainActivity", "=== STARTING POSE ANALYSIS SESSION ===")
-        Log.d("MainActivity", "Exercise type: $exerciseType")
-        
-        if (!::poseAnalyzer.isInitialized) {
-            Log.e("MainActivity", "Pose analyzer not initialized")
-            Toast.makeText(this, "Pose analyzer not ready. Please wait...", Toast.LENGTH_LONG).show()
-            return
-        }
-        
-        Log.d("MainActivity", "Pose analyzer is initialized, proceeding...")
-        
-        try {
-            Log.d("MainActivity", "Starting pose analysis for $exerciseType")
-            
-            Toast.makeText(this, "Pose analyzer ready for $exerciseType", Toast.LENGTH_SHORT).show()
-        } catch (e: Exception) {
-            Log.e("MainActivity", "Error starting pose analysis", e)
-            Toast.makeText(this, "Failed to start pose analysis: ${e.message}", Toast.LENGTH_LONG).show()
-        }
-        
-        Log.d("MainActivity", "=== POSE ANALYSIS SESSION START COMPLETE ===")
-    }
-
-    fun sendFrameForAnalysis(frame: Bitmap, exerciseType: String = "exercise") {
-        Log.d("MainActivity", "=== SEND FRAME FOR ANALYSIS CALLED ===")
-        Log.d("MainActivity", "Frame size: ${frame.width}x${frame.height}")
-        Log.d("MainActivity", "Exercise type: $exerciseType")
-        
-        if (!::poseAnalyzer.isInitialized) {
-            Log.e("MainActivity", "Pose analyzer not initialized")
-            return
-        }
-        
-        Log.d("MainActivity", "Pose analyzer is initialized, calling analyzePose...")
-        
-        // Use ML Kit pose analysis (real-time detection!)
-        poseAnalyzer.analyzePose(frame, exerciseType)
-        
-        Log.d("MainActivity", "analyzePose call completed")
-    }
-    
-    // Callback for pose analysis results
-    fun onPoseAnalysisResult(feedback: String) {
-        Log.d("MainActivity", "=== POSE ANALYSIS RESULT CALLBACK ===")
-        Log.d("MainActivity", "Feedback received: $feedback")
-        handleAnalysisResponse(feedback)
-    }
-
-    private fun handleAnalysisResponse(feedback: String) {
-        Log.d("MainActivity", "=== HANDLING ANALYSIS RESPONSE ===")
-        Log.d("MainActivity", "Feedback to handle: $feedback")
-        
-        if (feedback.isNotEmpty()) {
-            Log.d("MainActivity", "Processing non-empty feedback")
-            // Speak the feedback to the user
-            tts.speak(feedback, TextToSpeech.QUEUE_FLUSH, null, null)
-            
-            // Show a brief toast for visual feedback
-            Toast.makeText(this, feedback, Toast.LENGTH_SHORT).show()
-        } else {
-            Log.d("MainActivity", "Empty feedback received, skipping processing")
-        }
-    }
-    
-
-    
-
-    
-    fun testPoseAnalysis() {
-        Log.d("MainActivity", "=== POSE ANALYSIS TEST START ===")
-        
-        if (!::poseAnalyzer.isInitialized) {
-            Log.e("MainActivity", "Pose analyzer not initialized")
-            Toast.makeText(this, "Pose analyzer not ready. Please wait...", Toast.LENGTH_LONG).show()
-            return
-        }
-        
-        Log.d("MainActivity", "Pose analyzer is initialized, testing...")
-        
-        // Create a test bitmap (1x1 pixel) for testing
-        val testBitmap = Bitmap.createBitmap(1, 1, Bitmap.Config.ARGB_8888)
-        
-        coroutineScope.launch(Dispatchers.IO) {
+            Log.e("CameraDebug", "Error processing image", e)
+        } finally {
             try {
-                Log.d("MainActivity", "Testing pose analysis...")
-                poseAnalyzer.analyzePose(testBitmap, "test")
-                Log.d("MainActivity", "Pose analysis test completed successfully")
-                
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "✅ Pose analysis working!", Toast.LENGTH_LONG).show()
-                }
+                imageProxy.close()
             } catch (e: Exception) {
-                Log.e("MainActivity", "Pose analysis test failed", e)
-                Log.e("MainActivity", "Exception type: ${e.javaClass.simpleName}")
-                Log.e("MainActivity", "Exception message: ${e.message}")
+                Log.e("CameraDebug", "Error closing imageProxy", e)
+            }
+        }
+    }
+    
+    // TTS state management
+    private var isTtsSpeaking = false
+    private var lastTtsTime = 0L
+    private val minTtsInterval = 4000L // 4 seconds minimum between TTS calls
+    private var lastFeedbackTime = 0L
+    private val feedbackInterval = 4000L // Exactly 4 seconds between feedback
+    
+    public fun speakAIResponse(response: String) {
+        if (response.isBlank()) return
+        
+        val currentTime = System.currentTimeMillis()
+        
+        // For exercise instructions and countdown, allow immediate speech
+        val isExerciseInstruction = response.contains("Let's do") || 
+                                  response.contains("Begin!") || 
+                                  response.matches(Regex("\\d+")) ||
+                                  response.contains("Welcome to the Exercise Assistant") ||
+                                  response.contains("These are the steps") ||
+                                  response.contains("Get ready!") ||
+                                  response.contains("camera will track") ||
+                                  response.contains("Starting") ||
+                                  response.contains("Stand in front") ||
+                                  response.contains("Stand facing") ||
+                                  response.contains("Start on your hands") ||
+                                  response.contains("Stand on one leg") ||
+                                  response.contains("Lie on your back") ||
+                                  response.contains("Stand with feet") ||
+                                  response.contains("Starting in")
+        
+        // For feedback during exercise, enforce 4-second intervals
+        // Add more comprehensive feedback detection
+        val isExerciseFeedback = !isExerciseInstruction && (
+            response.contains("knee", ignoreCase = true) || 
+            response.contains("back", ignoreCase = true) || 
+            response.contains("hip", ignoreCase = true) || 
+            response.contains("shoulder", ignoreCase = true) || 
+            response.contains("elbow", ignoreCase = true) ||
+            response.contains("arm", ignoreCase = true) ||
+            response.contains("foot", ignoreCase = true) ||
+            response.contains("body", ignoreCase = true) ||
+            response.contains("Great", ignoreCase = true) ||
+            response.contains("Perfect", ignoreCase = true) ||
+            response.contains("Excellent", ignoreCase = true) ||
+            response.contains("Good job", ignoreCase = true) ||
+            response.contains("no issue", ignoreCase = true) ||
+            response.contains("Keep", ignoreCase = true) ||
+            response.contains("Maintain", ignoreCase = true) ||
+            response.contains("Focus", ignoreCase = true) ||
+            response.contains("Try", ignoreCase = true) ||
+            response.contains("Don't", ignoreCase = true) ||
+            response.contains("Straight", ignoreCase = true) ||
+            response.contains("Bend", ignoreCase = true) ||
+            response.contains("Align", ignoreCase = true) ||
+            response.contains("visible", ignoreCase = true) ||
+            response.contains("frame", ignoreCase = true)
+        )
+        
+        if (isExerciseFeedback) {
+            // Enforce 4-second intervals for exercise feedback
+            if (currentTime - lastFeedbackTime < feedbackInterval) {
+                Log.d(TAG, "Skipping feedback - too soon (${currentTime - lastFeedbackTime}ms since last feedback)")
+                return
+            }
+            lastFeedbackTime = currentTime
+        }
+        
+        // Check if we should skip this TTS call due to timing (but allow exercise instructions)
+        if (!isExerciseInstruction || currentTime - lastTtsTime >= 1000) {
+            runOnUiThread {
+                currentFeedback = response
+                if (::tts.isInitialized) {
+                    if (isExerciseInstruction) {
+                        // Stop current speech and start new one for exercise instructions
+                        tts.stop()
+                        tts.speak(response, TextToSpeech.QUEUE_FLUSH, null, "tts_${System.currentTimeMillis()}")
+                    } else {
+                        // Queue for regular feedback
+                        tts.speak(response, TextToSpeech.QUEUE_ADD, null, "tts_${System.currentTimeMillis()}")
+                    }
+                    lastTtsTime = currentTime
+                    isTtsSpeaking = true
+                    Log.d(TAG, "TTS started: $response")
+                }
+            }
+        } else {
+            Log.d(TAG, "Skipping TTS - too soon since last call (${currentTime - lastTtsTime}ms)")
+        }
+    }
+    
+    // Method to stop TTS when needed
+    public fun stopTTS() {
+        runOnUiThread {
+            if (::tts.isInitialized && isTtsSpeaking) {
+                tts.stop()
+                isTtsSpeaking = false
+                Log.d(TAG, "TTS stopped")
+            }
+        }
+    }
+
+    // Send a message to the Firebase chat service and append the AI response
+    private fun sendChatMessage(message: String, roomId: String) {
+        coroutineScope.launch {
+            try {
+                setProcessing(true)
+                // Add user message to the chat
+                _chatMessages.add(ChatMessage.userMessage(message, roomId))
                 
-                withContext(Dispatchers.Main) {
-                    Toast.makeText(this@MainActivity, "❌ Pose analysis failed: ${e.message}", Toast.LENGTH_LONG).show()
+                // Use FirebaseChatService for AI responses
+                val response = FirebaseChatService.getChatResponse(message, roomId)
+                
+                // Add AI response to the chat
+                _chatMessages.add(ChatMessage.aiMessage(response, roomId))
+                
+            } catch (e: Exception) {
+                Log.e(TAG, "Error sending chat message", e)
+                _chatMessages.add(ChatMessage.aiMessage("Sorry, I couldn't reach the chat service. Please try again.", roomId))
+                runOnUiThread {
+                    Toast.makeText(this@MainActivity, "Chat service error: ${e.message}", Toast.LENGTH_SHORT).show()
+                }
+            } finally {
+                setProcessing(false)
+            }
+        }
+    }
+
+    // Analysis results
+    private var _analysisResultText = ""
+    var analysisResultText: String
+        get() = _analysisResultText
+        private set(value) {
+            _analysisResultText = value
+        }
+
+    // User feedback
+    private var _currentFeedback = ""
+    var currentFeedback: String
+        get() = _currentFeedback
+        private set(value) {
+            _currentFeedback = value
+        }
+    
+    // Pose landmarks for visualization
+    private var _poseLandmarks = mutableStateOf<Map<Int, Pair<Float, Float>>>(emptyMap())
+    var poseLandmarks: Map<Int, Pair<Float, Float>>
+        get() = _poseLandmarks.value
+        private set(value) {
+            _poseLandmarks.value = value
+        }
+
+    // Analysis timing
+    private var lastAnalysisTime = 0L
+    private val analysisInterval = 1000L
+
+    companion object {
+        private const val TAG = "MainActivity"
+        internal const val CHANNEL_ID = "elderly_care_reminders"
+        internal const val NOTIFICATION_ID = 1
+        private const val REMINDER_REQUEST_CODE = 1001
+        private const val CAMERA_PERMISSION_REQUEST_CODE = 1002
+    }
+
+    // Coroutine
+    private val coroutineScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+
+        // Request camera permission if not granted
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) 
+            != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(
+                this,
+                arrayOf(Manifest.permission.CAMERA),
+                CAMERA_PERMISSION_REQUEST_CODE
+            )
+        }
+
+        try {
+            // Initialize TTS
+            tts = TextToSpeech(this, this)
+
+            // Initialize camera executor
+            cameraExecutor = Executors.newSingleThreadExecutor()
+
+            // Initialize pose analyzer with TTS callback
+            poseAnalyzer = PoseAnalyzer(this)
+            poseAnalyzer.initializePoseAnalyzer(
+                callback = { feedback ->
+                    // Update UI with feedback
+                    runOnUiThread {
+                        currentFeedback = feedback
+                    }
+                },
+                ttsCallback = { feedback ->
+                    // Use TTS to speak the feedback
+                    if (feedback.isNotBlank()) {
+                        speakAIResponse(feedback)
+                    }
+                }
+            )
+
+            // Initialize Firebase chat service in background
+            coroutineScope.launch {
+                try {
+                    FirebaseChatService.initialize(this@MainActivity)
+                    Log.d(TAG, "FirebaseChatService initialized successfully")
+                } catch (e: Exception) {
+                    Log.e(TAG, "Failed to initialize FirebaseChatService", e)
+                    runOnUiThread {
+                        Toast.makeText(
+                            this@MainActivity,
+                            "Firebase chat initialization failed: ${e.message}",
+                            Toast.LENGTH_LONG
+                        ).show()
+                    }
+                }
+            }
+
+
+            // Create notification channel
+            createNotificationChannel()
+
+            // Compose UI
+            setContent {
+                MaterialTheme {
+                    // Navigation
+                    val navController = rememberNavController()
+
+                    // Local state for the UI
+                    val chatMessages by remember { derivedStateOf { _chatMessages.toList() } }
+                    val isProcessing by remember { derivedStateOf { _isProcessing.value } }
+
+                    NavHost(navController = navController, startDestination = AppDestinations.HOME) {
+                        composable(AppDestinations.HOME) {
+                            HomeScreen(
+                                navController = navController,
+                                activity = this@MainActivity,
+                                onStartExercise = { exerciseType ->
+                                    // Just navigate to exercise chatbot without starting exercise automatically
+                                    // Clear any previous exercise chat when opening
+                                    clearChat(ChatMessage.ROOM_EXERCISE)
+                                    // Add a welcome message to the exercise chat
+                                    _chatMessages.add(ChatMessage.aiMessage(
+                                        "Hello! I'm your exercise assistant. I can help you with exercise guidance, form tips, and motivation. What would you like to know about exercises?",
+                                        ChatMessage.ROOM_EXERCISE
+                                    ))
+                                    navController.navigate(AppDestinations.EXERCISE_CHATBOT)
+                                },
+                                onStartCameraExercise = { exerciseType ->
+                                    startExerciseSession(exerciseType)
+                                    // Navigate to camera with exercise type parameter
+                                    navController.navigate(AppDestinations.getCameraRoute(exerciseType))
+                                },
+                                onOpenCompanion = {
+                                    // Clear any previous companion chat when opening
+                                    clearChat(ChatMessage.ROOM_COMPANION)
+                                    // Add a welcome message to the companion chat
+                                    _chatMessages.add(ChatMessage.aiMessage(
+                                        "Hello! I'm your companion. How can I assist you today?",
+                                        ChatMessage.ROOM_COMPANION
+                                    ))
+                                    navController.navigate(AppDestinations.COMPANION_CHATBOT)
+                                }
+                            )
+                        }
+
+                        composable(AppDestinations.EXERCISE_CHATBOT) {
+                            ExerciseChatbotScreen(
+                                navController = navController,
+                                activity = this@MainActivity,
+                                onBack = { navController.popBackStack() },
+                                onEndExercise = {
+                                    endExerciseSession()
+                                    navController.popBackStack()
+                                },
+                                onSendMessage = { message ->
+                                    sendChatMessage(message, ChatMessage.ROOM_EXERCISE)
+                                },
+                                chatMessages = getMessagesForRoom(ChatMessage.ROOM_EXERCISE),
+                                isProcessing = isProcessing,
+                                roomId = ChatMessage.ROOM_EXERCISE
+                            )
+                        }
+
+                        composable(AppDestinations.COMPANION_CHATBOT) {
+                            CompanionChatbotScreen(
+                                navController = navController,
+                                activity = this@MainActivity,
+                                onBack = { navController.popBackStack() },
+                                onSendMessage = { message ->
+                                    sendChatMessage(message, ChatMessage.ROOM_COMPANION)
+                                },
+                                chatMessages = getMessagesForRoom(ChatMessage.ROOM_COMPANION),
+                                isProcessing = isProcessing,
+                                roomId = ChatMessage.ROOM_COMPANION
+                            )
+                        }
+
+                        composable(
+                            route = AppDestinations.CAMERA,
+                            arguments = listOf(
+                                navArgument("exerciseType") {
+                                    type = NavType.StringType
+                                    defaultValue = "default"
+                                }
+                            )
+                        ) { backStackEntry ->
+                            val exerciseType = backStackEntry.arguments?.getString("exerciseType") ?: "default"
+                            CameraScreen(
+                                exerciseType = exerciseType,
+                                navController = navController,
+                                onBack = { 
+                                    // End exercise session and stop all analysis/voiceover
+                                    endExerciseSession()
+                                    navController.popBackStack() 
+                                },
+                                onCapture = { image -> processImageForPose(image) },
+                                onStop = {
+                                    // End exercise session and stop all analysis/voiceover
+                                    endExerciseSession()
+                                    navController.popBackStack()
+                                },
+                                isExerciseActive = isExerciseActive,
+                                externalPoseLandmarks = poseLandmarks
+                            )
+                        }
+                    }
+                }
+            }
+
+        } catch (e: Exception) {
+            Log.e(TAG, "Error during onCreate initialization", e)
+            runOnUiThread {
+                Toast.makeText(this@MainActivity, "Startup error: ${e.message}", Toast.LENGTH_LONG).show()
+            }
+
+            // Minimal fallback UI so the app doesn't crash to home
+            setContent {
+                MaterialTheme {
+                    androidx.compose.material3.Surface(modifier = androidx.compose.ui.Modifier.fillMaxSize()) {
+                        androidx.compose.material3.Text(text = "App failed to initialize. See logs.")
+                    }
                 }
             }
         }
-        
-        Log.d("MainActivity", "=== POSE ANALYSIS TEST END ===")
     }
 
     override fun onInit(status: Int) {
         if (status == TextToSpeech.SUCCESS) {
-            val result = tts.setLanguage(Locale.US)
+            val result = tts.setLanguage(Locale.getDefault())
             if (result == TextToSpeech.LANG_MISSING_DATA || result == TextToSpeech.LANG_NOT_SUPPORTED) {
-                Log.e("MainActivity", "TTS language not supported")
+                Log.e(TAG, "TTS: Language not supported")
+            } else {
+                tts.setPitch(currentTtsPitch)
+                tts.setSpeechRate(currentTtsRate)
+                
+                // Set up TTS listener to track when speech finishes
+                tts.setOnUtteranceProgressListener(object : android.speech.tts.UtteranceProgressListener() {
+                    override fun onStart(utteranceId: String?) {
+                        Log.d(TAG, "TTS started: $utteranceId")
+                        isTtsSpeaking = true
+                    }
+                    
+                    override fun onDone(utteranceId: String?) {
+                        Log.d(TAG, "TTS finished: $utteranceId")
+                        isTtsSpeaking = false
+                    }
+                    
+                    override fun onError(utteranceId: String?) {
+                        Log.e(TAG, "TTS error: $utteranceId")
+                        isTtsSpeaking = false
+                    }
+                })
+                
+                Log.d(TAG, "TTS initialized with pitch: $currentTtsPitch, rate: $currentTtsRate")
             }
         } else {
-            Log.e("MainActivity", "TTS initialization failed")
+            Log.e(TAG, "TTS initialization failed")
         }
     }
 
-
-    
     override fun onDestroy() {
-        if (::tts.isInitialized) {
-            tts.stop()
-            tts.shutdown()
-        }
+        super.onDestroy()
+        tts.stop()
+        tts.shutdown()
+        cameraExecutor.shutdown()
         if (::poseAnalyzer.isInitialized) {
             poseAnalyzer.release()
         }
-        super.onDestroy()
     }
-}
 
-// Utility function to convert ImageProxy to Bitmap
-fun imageProxyToBitmap(imageProxy: ImageProxy): Bitmap {
-    val yBuffer = imageProxy.planes[0].buffer
-    val uBuffer = imageProxy.planes[1].buffer
-    val vBuffer = imageProxy.planes[2].buffer
-
-    val ySize = yBuffer.remaining()
-    val uSize = uBuffer.remaining()
-    val vSize = vBuffer.remaining()
-
-    val nv21 = ByteArray(ySize + uSize + vSize)
-
-    yBuffer.get(nv21, 0, ySize)
-    vBuffer.get(nv21, ySize, vSize)
-    uBuffer.get(nv21, ySize + vSize, uSize)
-
-    val yuvImage = YuvImage(nv21, ImageFormat.NV21, imageProxy.width, imageProxy.height, null)
-    val out = ByteArrayOutputStream()
-    yuvImage.compressToJpeg(Rect(0, 0, yuvImage.width, yuvImage.height), 100, out)
-    val imageBytes = out.toByteArray()
-    return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size)
-}
-
-@Composable
-fun HomeScreen(navController: NavHostController, activity: MainActivity) {
-    var showTimePicker by remember { mutableStateOf(false) }
-    var pickedHour by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.HOUR_OF_DAY)) }
-    var pickedMinute by remember { mutableIntStateOf(Calendar.getInstance().get(Calendar.MINUTE)) }
-    var reminderSetMessage by remember { mutableStateOf("") }
-    val context = LocalContext.current
-
-    val notificationPermissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { isGranted ->
-            if (isGranted) {
-                activity.scheduleReminder(context.applicationContext, pickedHour, pickedMinute)
-                reminderSetMessage = "Reminder set for ${"%02d".format(pickedHour)}:${"%02d".format(pickedMinute)}"
-            } else {
-                Toast.makeText(context, "Notification permission denied.", Toast.LENGTH_LONG).show()
-                reminderSetMessage = "Notification permission needed to set reminders."
+    // ActivityResultLauncher for camera permission
+    private val requestPermissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { isGranted ->
+        if (isGranted) {
+            // Camera permission granted, start camera
+            if (::previewView.isInitialized) {
+                startCamera()
             }
-        }
-    )
-
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(title = { Text("Elderly Care App", style = MaterialTheme.typography.headlineMedium) })
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .padding(innerPadding)
-                .padding(24.dp)
-                .fillMaxSize(),
-            verticalArrangement = Arrangement.Center,
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Text("Welcome!", style = MaterialTheme.typography.headlineSmall)
-            Spacer(Modifier.height(32.dp))
-            Button(onClick = { navController.navigate(AppDestinations.EXERCISE_CHATBOT) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Exercise Chatbot", style = MaterialTheme.typography.bodyLarge)
-            }
-            Spacer(Modifier.height(16.dp))
-            Button(onClick = { navController.navigate(AppDestinations.COMPANION_CHATBOT) }, modifier = Modifier.fillMaxWidth()) {
-                Text("Companion Chatbot", style = MaterialTheme.typography.bodyLarge)
-            }
-            Spacer(Modifier.height(32.dp))
-            Text("Set daily reminder time:", style = MaterialTheme.typography.titleMedium)
-            Spacer(Modifier.height(8.dp))
-            Button(onClick = { showTimePicker = true }, modifier = Modifier.fillMaxWidth()) {
-                Text("Pick Time (${"%02d".format(pickedHour)}:${"%02d".format(pickedMinute)})", style = MaterialTheme.typography.bodyLarge)
-            }
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = {
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                        when (ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS)) {
-                            PackageManager.PERMISSION_GRANTED -> {
-                                activity.scheduleReminder(context.applicationContext, pickedHour, pickedMinute)
-                                reminderSetMessage = "Reminder set for ${"%02d".format(pickedHour)}:${"%02d".format(pickedMinute)}"
-                            }
-                            else -> {
-                                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                            }
-                        }
-                    } else {
-                        activity.scheduleReminder(context.applicationContext, pickedHour, pickedMinute)
-                        reminderSetMessage = "Reminder set for ${"%02d".format(pickedHour)}:${"%02d".format(pickedMinute)}"
-                    }
-                },
-                modifier = Modifier.fillMaxWidth(),
-                enabled = !showTimePicker
-            ) {
-                Text("Set Reminder Notification", style = MaterialTheme.typography.bodyLarge)
-            }
-            Spacer(Modifier.height(16.dp))
-            if (reminderSetMessage.isNotEmpty()) {
-                Text(reminderSetMessage, color = MaterialTheme.colorScheme.primary, style = MaterialTheme.typography.bodyMedium)
-            }
-
-            if (showTimePicker) {
-                TimePickerDialog(
-                    initialHour = pickedHour,
-                    initialMinute = pickedMinute,
-                    onTimeSelected = { hour, minute ->
-                        pickedHour = hour
-                        pickedMinute = minute
-                        showTimePicker = false
-                    },
-                    onDismissRequest = { showTimePicker = false }
-                )
-            }
+        } else {
+            Toast.makeText(
+                this, 
+                "Camera permission is required for exercise analysis",
+                Toast.LENGTH_LONG
+            ).show()
         }
     }
-}
 
-@Composable
-fun ExerciseChatbotScreen(navController: NavHostController) {
-    var inputText by remember { mutableStateOf("") }
-    val messages = remember { mutableStateListOf<ChatMessage>() }
+    // Camera setup
+    private fun startCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("Exercise", style = MaterialTheme.typography.headlineMedium) },
-                navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+        cameraProviderFuture.addListener({
+            // Used to bind the lifecycle of cameras to the lifecycle owner
+            val cameraProvider: ProcessCameraProvider = cameraProviderFuture.get()
+
+            // Preview
+            val preview = Preview.Builder()
+                .build()
+                .also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+            // Set up the capture use case to allow taking photos
+            imageCapture = ImageCapture.Builder().build()
+
+            // Set up the image analysis use case for pose detection
+            imageAnalyzer = ImageAnalysis.Builder()
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also {
+                    it.setAnalyzer(cameraExecutor) { imageProxy ->
+                        processImageForPose(imageProxy)
                     }
                 }
-            )
-        }
-    ) { padding ->
-        Column(modifier = Modifier.fillMaxSize().padding(padding)) {
-            LazyColumn(
-                modifier = Modifier.weight(1f).padding(8.dp),
-                reverseLayout = true
-            ) {
-                items(messages.asReversed()) { msg -> // Use asReversed for chronological order
-                    MessageBubble(msg)
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-            }
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                OutlinedTextField(
-                    value = inputText,
-                    onValueChange = { inputText = it },
-                    modifier = Modifier.weight(1f).padding(end = 8.dp),
-                    placeholder = { Text("Ask about neck, back, or leg exercises...", style = MaterialTheme.typography.bodyLarge) },
-                    textStyle = MaterialTheme.typography.bodyLarge
-                )
-                Button(onClick = {
-                    if (inputText.isNotBlank()) {
-                        val userMessage = ChatMessage(inputText, true)
-                        messages.add(userMessage)
-                        // Remove hardcoded logic and use Gemini API
-                        streamChatResponse(
-                            inputText,
-                            onChunkReceived = { chunk ->
-                                messages.add(ChatMessage(chunk, false))
-                            }
-                        )
-                        inputText = ""
-                    }
-                }) {
-                    Text("Send", style = MaterialTheme.typography.bodyLarge)
-                }
-            }
-            Spacer(Modifier.height(16.dp))
-            Button(
-                onClick = { navController.navigate(AppDestinations.CAMERA) },
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)
-            ) {
-                Text("Guided Camera Exercise", style = MaterialTheme.typography.bodyLarge)
-            }
-        }
-    }
-}
 
-@Composable
-fun CompanionChatbotScreen(navController: NavHostController) {
-    var userInput by remember { mutableStateOf("") }
-    val messages = remember { mutableStateListOf<ChatMessage>() }
-    var isLoading by remember { mutableStateOf(false) }
-    val coroutineScope = rememberCoroutineScope()
+            // Select back camera as a default
+            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("Companion Chatbot", style = MaterialTheme.typography.headlineMedium) },
-                navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier.padding(innerPadding).padding(16.dp).fillMaxSize()
-        ) {
-            LazyColumn(
-                modifier = Modifier.weight(1f).padding(bottom = 8.dp),
-                reverseLayout = true
-            ) {
-                items(messages.asReversed()) { msg ->
-                    MessageBubble(msg)
-                    Spacer(modifier = Modifier.height(8.dp))
-                }
-            }
-
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                OutlinedTextField(
-                    value = userInput,
-                    onValueChange = { userInput = it },
-                    modifier = Modifier.weight(1f),
-                    placeholder = { Text("Ask something...", style = MaterialTheme.typography.bodyLarge) },
-                    enabled = !isLoading,
-                    textStyle = MaterialTheme.typography.bodyLarge
-                )
-                Spacer(Modifier.width(8.dp))
-                Button(
-                    onClick = {
-                        if (userInput.isNotBlank()) {
-                            val userMsg = ChatMessage(userInput, true)
-                            messages.add(userMsg)
-                            val currentInput = userInput
-                            isLoading = true
-                            
-                            streamChatResponse(
-                                currentInput,
-                                onChunkReceived = { chunk ->
-                                    if (messages.lastOrNull()?.isUser == false) {
-                                        val lastBotMessage = messages.removeAt(messages.lastIndex)
-                                        messages.add(lastBotMessage.copy(text = lastBotMessage.text + chunk))
-                                    } else {
-                                        messages.add(ChatMessage(chunk, false))
-                                    }
-                                }
-                            )
-                            
-                            userInput = ""
-                            isLoading = false
-                        }
-                    },
-                    enabled = !isLoading && userInput.isNotBlank()
-                ) {
-                    if (isLoading) {
-                        CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
-                    } else {
-                        Text("Send", style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
-            }
-        }
-    }
-}
-
-fun streamChatResponse(userInput: String, onChunkReceived: (String) -> Unit) {
-    // Replace this URL with your Render deployment URL
-    val url = "https://elderlink-ar-backend.onrender.com/chat"
-    val requestBody = JSONObject().put("prompt", userInput).toString()
-        .toRequestBody("application/json".toMediaType())
-
-    val client = OkHttpClient()
-    val request = Request.Builder()
-        .url(url)
-        .post(requestBody)
-        .build()
-
-    client.newCall(request).enqueue(object : Callback {
-        override fun onFailure(call: Call, e: IOException) {
-            onChunkReceived("Error: ${e.message}")
-        }
-
-        override fun onResponse(call: Call, response: Response) {
             try {
-                val responseBody = response.body?.string()
-                if (responseBody != null) {
-                    val json = JSONObject(responseBody)
-                    val candidates = json.optJSONArray("candidates")
-                    if (candidates != null && candidates.length() > 0) {
-                        val content = candidates.getJSONObject(0).optJSONObject("content")
-                        val parts = content?.optJSONArray("parts")
-                        if (parts != null && parts.length() > 0) {
-                            val text = parts.getJSONObject(0).optString("text")
-                            if (text.isNotEmpty()) {
-                                onChunkReceived(text)
-                            } else {
-                                onChunkReceived("No response text received")
-                            }
-                        } else {
-                            onChunkReceived("No content parts found in response")
-                        }
-                    } else {
-                        onChunkReceived("No candidates found in response")
-                    }
-                } else {
-                    onChunkReceived("Empty response body")
-                }
-            } catch (e: Exception) {
-                onChunkReceived("Error parsing response: ${e.message}")
-            }
-        }
-    })
-}
+                // Unbind use cases before rebinding
+                cameraProvider.unbindAll()
 
-@Composable
-fun MessageBubble(chatMessage: ChatMessage) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(
-                start = if (chatMessage.isUser) 64.dp else 8.dp,
-                end = if (chatMessage.isUser) 8.dp else 64.dp,
-                top = 4.dp,
-                bottom = 4.dp
-            ),
-        horizontalArrangement = if (chatMessage.isUser) Arrangement.End else Arrangement.Start
+                    // Bind use cases to camera
+                    camera = cameraProvider.bindToLifecycle(
+                        this, cameraSelector, preview, imageCapture, imageAnalyzer
+                    )
+
+            } catch (exc: Exception) {
+                Log.e(TAG, "Use case binding failed", exc)
+            }
+
+        }, ContextCompat.getMainExecutor(this))
+
+    // Note: imageProxy instances are closed inside the analyzer callback (processImageForPose)
+    }
+
+    // Extension function to convert ImageProxy to Bitmap
+    // Renamed to toBitmapCompat to avoid shadowing the member function
+    private fun ImageProxy.toBitmapCompat(): Bitmap {
+        val yBuffer = planes[0].buffer // Y
+        val uBuffer = planes[1].buffer // U
+        val vBuffer = planes[2].buffer // V
+
+        val ySize = yBuffer.remaining()
+        val uSize = uBuffer.remaining()
+        val vSize = vBuffer.remaining()
+
+        val nv21 = ByteArray(ySize + uSize + vSize)
+
+        // Y buffer is first
+        yBuffer.get(nv21, 0, ySize)
+
+        // Interleave U and V
+        vBuffer.get(nv21, ySize, vSize)
+        uBuffer.get(nv21, ySize + vSize, uSize)
+
+        val yuvImage = android.graphics.YuvImage(
+            nv21,
+            ImageFormat.NV21,
+            this.width,
+            this.height,
+            null
+        )
+        val out = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(
+            Rect(0, 0, this.width, this.height),
+            100,
+            out
+        )
+        val imageBytes = out.toByteArray()
+
+        // Rotate the bitmap if needed
+        val matrix = Matrix()
+        matrix.postRotate(this.imageInfo.rotationDegrees.toFloat())
+
+        return BitmapFactory.decodeByteArray(imageBytes, 0, imageBytes.size).let {
+            Bitmap.createBitmap(it, 0, 0, it.width, it.height, matrix, true)
+        }
+    }
+
+    // Helper class for image compression
+    private class JpegCompressor(
+        private val data: ByteArray,
+        private val format: Int,
+        private val width: Int,
+        private val height: Int,
+        private val strides: IntArray?
     ) {
-        Card(
-            shape = RoundedCornerShape(
-                topStart = if (chatMessage.isUser) 16.dp else 0.dp,
-                topEnd = if (chatMessage.isUser) 0.dp else 16.dp,
-                bottomStart = 16.dp,
-                bottomEnd = 16.dp
-            ),
-            colors = CardDefaults.cardColors(
-                containerColor = if (chatMessage.isUser) MaterialTheme.colorScheme.primaryContainer
-                else MaterialTheme.colorScheme.secondaryContainer
-            )
+        fun compressToJpeg(
+            rect: android.graphics.Rect,
+            quality: Int,
+            stream: java.io.OutputStream
         ) {
-            Text(
-                text = chatMessage.text,
-                modifier = Modifier.padding(12.dp),
-                style = MaterialTheme.typography.bodyLarge
+            val yuvImage = android.graphics.YuvImage(
+                data, format, width, height, strides
             )
+            yuvImage.compressToJpeg(rect, quality, stream)
         }
     }
-}
 
-@Composable
-fun CameraScreen(navController: NavHostController) {
-    val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
-    val cameraProviderFuture = remember { ProcessCameraProvider.getInstance(context) }
-    val activity = context as MainActivity
+    // Function to set reminder
+    private fun setReminder(hour: Int, minute: Int, requestCode: Int) {
+        val alarmManager = getSystemService(Context.ALARM_SERVICE) as AlarmManager
+        val intent = Intent(this, ReminderReceiver::class.java).apply {
+            action = Constants.REMINDER_ACTION
+            putExtra("requestCode", requestCode)
+        }
 
-    var hasCamPermission by remember {
-        mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
-    }
-    val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission(),
-        onResult = { granted ->
-            hasCamPermission = granted
-            if (!granted) {
-                Toast.makeText(context, "Camera permission denied.", Toast.LENGTH_LONG).show()
+        val calendar = Calendar.getInstance().apply {
+            set(Calendar.HOUR_OF_DAY, hour)
+            set(Calendar.MINUTE, minute)
+            set(Calendar.SECOND, 0)
+            if (timeInMillis <= System.currentTimeMillis()) {
+                add(Calendar.DAY_OF_YEAR, 1)
             }
         }
-    )
 
-    LaunchedEffect(key1 = true) {
-        if (!hasCamPermission) {
-            permissionLauncher.launch(Manifest.permission.CAMERA)
-        }
+        val pendingIntent = PendingIntent.getBroadcast(
+            this, requestCode, intent,
+            PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
+        )
+
+        alarmManager.setExactAndAllowWhileIdle(
+            AlarmManager.RTC_WAKEUP,
+            calendar.timeInMillis,
+            pendingIntent
+        )
     }
 
-    var analysisResultText by remember { mutableStateOf("Analysis results will appear here.") }
-    var isAnalyzing by remember { mutableStateOf(false) }
-    var selectedExercise by remember { mutableStateOf("chair_squat") }
-    var lastAnalysisTime by remember { mutableStateOf(0L) }
-    var exerciseSessionStarted by remember { mutableStateOf(false) }
-    
-    val imageAnalyzer = remember(exerciseSessionStarted) { 
-        Log.d("MainActivity", "Creating new MyImageAnalyzer with exerciseSessionStarted: $exerciseSessionStarted")
-        MyImageAnalyzer(
-            onFrameAnalyzed = { result -> 
-                analysisResultText = result 
-            },
-            onGeminiAnalysis = { bitmap ->
-                Log.d("MainActivity", "=== ON GEMINI ANALYSIS CALLBACK TRIGGERED ===")
-                Log.d("MainActivity", "Bitmap size: ${bitmap.width}x${bitmap.height}")
-                Log.d("MainActivity", "exerciseSessionStarted: $exerciseSessionStarted")
-                Log.d("MainActivity", "isAnalyzing: $isAnalyzing")
-                Log.d("MainActivity", "Time since last analysis: ${System.currentTimeMillis() - lastAnalysisTime}ms")
-                
-                val currentTime = System.currentTimeMillis()
-                if (exerciseSessionStarted && !isAnalyzing && (currentTime - lastAnalysisTime) >= 2000) {
-                    Log.d("MainActivity", "All conditions met - calling sendFrameForAnalysis")
-                    isAnalyzing = true
-                    lastAnalysisTime = currentTime
-                    activity.sendFrameForAnalysis(bitmap, selectedExercise)
-                    // Reset analyzing flag after a delay to prevent too frequent analysis
-                    // Frame rate: every 2 seconds as per best practices for cost management
-                    kotlinx.coroutines.CoroutineScope(kotlinx.coroutines.Dispatchers.Main).launch {
-                        kotlinx.coroutines.delay(2000) // 2 second delay between analyses
-                        isAnalyzing = false
-                        Log.d("MainActivity", "Analysis cooldown completed, isAnalyzing set to false")
-                    }
-                } else {
-                    Log.d("MainActivity", "Conditions not met for analysis:")
-                    Log.d("MainActivity", "  - exerciseSessionStarted: $exerciseSessionStarted")
-                    Log.d("MainActivity", "  - !isAnalyzing: ${!isAnalyzing}")
-                    Log.d("MainActivity", "  - time >= 2000: ${(currentTime - lastAnalysisTime) >= 2000}")
-                }
-            },
-            isAnalysisActive = exerciseSessionStarted
-        ) 
-    }
-    val analysisExecutor = remember { Executors.newSingleThreadExecutor() }
+    class ReminderReceiver : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == Constants.REMINDER_ACTION) {
+                val builder = NotificationCompat.Builder(context, MainActivity.CHANNEL_ID)
+                    .setSmallIcon(android.R.drawable.ic_dialog_info)
+                    .setContentTitle("Elderly Care Reminder")
+                    .setContentText("Time for your daily check-in or exercise!")
+                    .setPriority(NotificationCompat.PRIORITY_DEFAULT)
+                    .setAutoCancel(true)
 
-    // Camera lens facing state
-    var lensFacing by remember { mutableStateOf(CameraSelector.LENS_FACING_BACK) }
-
-    DisposableEffect(Unit) {
-        onDispose {
-            analysisExecutor.shutdown()
-        }
-    }
-
-    Scaffold(
-        topBar = {
-            CenterAlignedTopAppBar(
-                title = { Text("AI Exercise Coach", style = MaterialTheme.typography.headlineMedium) },
-                navigationIcon = {
-                    IconButton(onClick = { navController.popBackStack() }) {
-                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
-                    }
-                }
-            )
-        }
-    ) { paddingValues ->
-                Column(modifier = Modifier.padding(paddingValues).fillMaxSize()) {
-            // Real-time Pose Detection Notice
-            Card(
-                modifier = Modifier.fillMaxWidth().padding(8.dp),
-                colors = CardDefaults.cardColors(
-                    containerColor = MaterialTheme.colorScheme.tertiaryContainer
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(8.dp)
-                ) {
-                    Text(
-                        text = "🎯 Real-time Pose Detection",
-                        style = MaterialTheme.typography.titleSmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer
-                    )
-                    Text(
-                        text = "Using ML Kit to analyze your actual form and provide live feedback",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onTertiaryContainer,
-                        modifier = Modifier.padding(top = 2.dp)
-                    )
-                }
-            }
-            
-            if (hasCamPermission) {
-                // Exercise selection dropdown
-                var expanded by remember { mutableStateOf(false) }
-                val exercises = listOf(
-                    "chair_squat" to "Chair Squat",
-                    "wall_pushup" to "Wall Push-up", 
-                    "gentle_plank" to "Gentle Plank",
-                    "standing_balance" to "Standing Balance",
-                    "gentle_bridge" to "Gentle Bridge",
-                    "arm_raises" to "Arm Raises"
-                )
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    Text(
-                        "Exercise:",
-                        style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(end = 8.dp)
-                    )
-                    
-                    Box(modifier = Modifier.weight(1f)) {
-                        Button(
-                            onClick = { expanded = true },
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = ButtonDefaults.buttonColors(
-                                containerColor = MaterialTheme.colorScheme.secondaryContainer
-                            )
-                        ) {
-                            Text(
-                                exercises.find { it.first == selectedExercise }?.second ?: "Select",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                        
-                        DropdownMenu(
-                            expanded = expanded,
-                            onDismissRequest = { expanded = false }
-                        ) {
-                            exercises.forEach { (exerciseKey, exerciseName) ->
-                                DropdownMenuItem(
-                                    text = { Text(exerciseName) },
-                                    onClick = {
-                                        selectedExercise = exerciseKey
-                                        expanded = false
-                                    }
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                // Control buttons in a compact row
-                Row(
-                    modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp, vertical = 4.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    Button(
-                        onClick = {
-                            Log.d("MainActivity", "=== START/STOP ANALYSIS BUTTON CLICKED ===")
-                            Log.d("MainActivity", "Current exerciseSessionStarted: $exerciseSessionStarted")
-                            Log.d("MainActivity", "Selected exercise: $selectedExercise")
-                            
-                            if (!exerciseSessionStarted) {
-                                Log.d("MainActivity", "Starting exercise session...")
-                                activity.startExerciseSession(selectedExercise)
-                                exerciseSessionStarted = true
-                                Log.d("MainActivity", "Exercise session started successfully")
-                            } else {
-                                Log.d("MainActivity", "Stopping exercise session...")
-                                exerciseSessionStarted = false
-                                Log.d("MainActivity", "Exercise session stopped")
-                            }
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (!exerciseSessionStarted) MaterialTheme.colorScheme.primary 
-                            else MaterialTheme.colorScheme.error
-                        ),
-                        modifier = Modifier.weight(1f).padding(end = 4.dp)
-                    ) {
-                        Text(
-                            if (!exerciseSessionStarted) "Start Analysis" else "Stop",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    
-                    Button(
-                        onClick = {
-                            activity.testPoseAnalysis()
-                        },
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = MaterialTheme.colorScheme.tertiary
-                        ),
-                        modifier = Modifier.weight(1f).padding(horizontal = 4.dp)
-                    ) {
-                        Text(
-                            "Test",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                    
-                    Button(
-                        onClick = {
-                            lensFacing = if (lensFacing == CameraSelector.LENS_FACING_BACK) CameraSelector.LENS_FACING_FRONT else CameraSelector.LENS_FACING_BACK
-                        },
-                        modifier = Modifier.weight(1f).padding(start = 4.dp)
-                    ) {
-                        Text(
-                            if (lensFacing == CameraSelector.LENS_FACING_BACK) "Front Cam" else "Back Cam",
-                            style = MaterialTheme.typography.bodySmall
-                        )
-                    }
-                }
-                AndroidView(
-                    factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        try {
-                            val cameraProvider = cameraProviderFuture.get()
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            val cameraSelector = CameraSelector.Builder()
-                                .requireLensFacing(lensFacing)
-                                .build()
-                            val imageAnalysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also { it.setAnalyzer(analysisExecutor, imageAnalyzer) }
-
-                            cameraProvider.unbindAll()
-                            cameraProvider.bindToLifecycle(
-                                lifecycleOwner,
-                                cameraSelector,
-                                preview,
-                                imageAnalysis
-                            )
-                        } catch (exc: Exception) {
-                            Log.e("CameraScreen", "Use case binding failed", exc)
-                            analysisResultText = "Error: Could not bind camera. ${exc.localizedMessage}"
-                        }
-                        previewView
-                    },
-                    modifier = Modifier.weight(1f)
-                )
-                // Analysis status and exercise instructions
-                if (exerciseSessionStarted) {
-                    Card(
-                        modifier = Modifier.fillMaxWidth().padding(16.dp),
-                        colors = CardDefaults.cardColors(
-                            containerColor = if (isAnalyzing) MaterialTheme.colorScheme.primaryContainer 
-                            else MaterialTheme.colorScheme.secondaryContainer
-                        )
-                    ) {
-                        Column(
-                            modifier = Modifier.padding(16.dp)
-                        ) {
-                            Row(
-                                verticalAlignment = Alignment.CenterVertically,
-                                horizontalArrangement = Arrangement.SpaceBetween
-                            ) {
-                                Text(
-                                    text = if (isAnalyzing) "Analyzing your $selectedExercise form..." else "Ready for $selectedExercise analysis",
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = if (isAnalyzing) MaterialTheme.colorScheme.onPrimaryContainer 
-                                    else MaterialTheme.colorScheme.onSecondaryContainer
-                                )
-                                if (isAnalyzing) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(20.dp),
-                                        strokeWidth = 2.dp,
-                                        color = MaterialTheme.colorScheme.onPrimaryContainer
-                                    )
-                                }
-                            }
-                            if (!isAnalyzing) {
-                                Text(
-                                    text = when (selectedExercise) {
-                                        "chair_squat" -> "Sit down slowly, then stand up. Keep your back straight and use a chair for support."
-                                        "wall_pushup" -> "Stand facing a wall, place hands on wall, and do gentle push-ups. Great for back safety!"
-                                        "gentle_plank" -> "Hold a gentle plank position. Keep your back straight and breathe steadily."
-                                        "standing_balance" -> "Stand on one leg, then the other. Hold onto a chair for support if needed."
-                                        "gentle_bridge" -> "Lie on your back, bend knees, lift hips gently. Strengthens back safely."
-                                        "arm_raises" -> "Raise your arms slowly to shoulder level. Great for posture and shoulder strength."
-                                        else -> "Follow the on-screen guidance for safe exercise form."
-                                    },
-                                    style = MaterialTheme.typography.bodySmall,
-                                    color = MaterialTheme.colorScheme.onSecondaryContainer,
-                                    modifier = Modifier.padding(top = 8.dp)
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                Text(
-                    text = analysisResultText,
-                    modifier = Modifier.fillMaxWidth().padding(16.dp),
-                    style = MaterialTheme.typography.bodySmall
-                )
-            } else {
-                Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Text("Camera permission is required.", style = MaterialTheme.typography.bodyLarge)
-                        Spacer(modifier = Modifier.height(8.dp))
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                            Text("Grant Permission")
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-fun TimePickerDialog(
-    initialHour: Int,
-    initialMinute: Int,
-    onTimeSelected: (hour: Int, minute: Int) -> Unit,
-    onDismissRequest: () -> Unit
-) {
-    var tempHour by remember { mutableStateOf(initialHour.toString().padStart(2, '0')) }
-    var tempMinute by remember { mutableStateOf(initialMinute.toString().padStart(2, '0')) }
-    val context = LocalContext.current
-
-    Dialog(onDismissRequest = onDismissRequest) {
-        Card(
-            modifier = Modifier.fillMaxWidth().padding(16.dp),
-            shape = RoundedCornerShape(16.dp),
-        ) {
-            Column(
-                modifier = Modifier.padding(16.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
-            ) {
-                Text("Select Reminder Time", style = MaterialTheme.typography.titleLarge)
-                Spacer(modifier = Modifier.height(16.dp))
-                
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    Column {
-                        Text("Hour (0-23):", style = MaterialTheme.typography.bodyLarge)
-                        OutlinedTextField(
-                            value = tempHour,
-                            onValueChange = {
-                                val v = it.toIntOrNull()
-                                if (v != null && v in 0..23) tempHour = it
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyLarge
-                        )
-                    }
-                    Column {
-                        Text("Minute (0-59):", style = MaterialTheme.typography.bodyLarge)
-                        OutlinedTextField(
-                            value = tempMinute,
-                            onValueChange = {
-                                val v = it.toIntOrNull()
-                                if (v != null && v in 0..59) tempMinute = it
-                            },
-                            singleLine = true,
-                            textStyle = MaterialTheme.typography.bodyLarge
-                        )
-                    }
-                }
-                
-                Spacer(modifier = Modifier.height(16.dp))
-                    
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceEvenly
-                ) {
-                    TextButton(onClick = onDismissRequest) {
-                        Text("Cancel", style = MaterialTheme.typography.bodyLarge)
-                    }
-                    TextButton(
-                        onClick = {
-                            val hour = tempHour.toIntOrNull() ?: initialHour
-                            val minute = tempMinute.toIntOrNull() ?: initialMinute
-                            onTimeSelected(hour, minute)
-                        }
-                    ) {
-                        Text("OK", style = MaterialTheme.typography.bodyLarge)
-                    }
-                }
+                NotificationManagerCompat.from(context)
+                    .notify(MainActivity.NOTIFICATION_ID, builder.build())
             }
         }
     }
