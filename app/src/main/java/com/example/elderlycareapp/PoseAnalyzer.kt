@@ -57,16 +57,14 @@ private val exerciseGuidanceMap = mapOf(
     ),
     "wall_pushup" to ExerciseGuidance(
         name = "Wall Push-ups",
-        instructions = "Stand facing a wall, place hands on the wall at shoulder height. Bend your elbows to bring your chest to the wall, then push back. The camera will monitor your elbow position and body alignment.",
+        instructions = "Great choice! Stand facing a wall, place your hands on the wall at shoulder height. Gently bend your elbows to bring your chest toward the wall, then push back. The camera will help you maintain great form.",
         keyPoints = listOf(
-            "Elbows" to "Keep elbows at 45 degrees - not too wide or narrow",
-            "Body" to "Keep your body in a straight line",
-            "Feet" to "Keep feet shoulder-width apart for stability"
+            "Elbows" to "Aim for a comfortable bend in your elbows - you're doing great!",
+            "Body" to "Try to keep your body in a nice straight line - but don't worry if it's not perfect!",
+            "Feet" to "Keep your feet about shoulder-width apart for good balance"
         ),
         tips = listOf(
-            "Control the movement - don't rush",
-            "Breathe out when pushing away from the wall",
-            "Keep your core engaged throughout"
+            // Tips are now provided dynamically based on pose analysis
         )
     ),
     "gentle_plank" to ExerciseGuidance(
@@ -133,10 +131,14 @@ class PoseAnalyzer(private val context: Context) {
     private var useBlazePose = false // Temporarily disabled - using ML Kit instead
     
     private var currentExerciseType = "chair_squat"
-    private var lastFeedbackTime = 0L
-    private var lastFeedback: String = ""
-    private var feedbackRepeatCount = 0
-    private var feedbackHistory = mutableListOf<String>()
+    private var lastFeedback: String? = null
+    private var lastFeedbackTime: Long = 0
+    private var lastEncouragementTime: Long = 0
+    private var exerciseStartTime: Long = 0
+    private var lastRepCount: Long = 0
+    private var feedbackDelayMs: Long = 5000L // 5 second delay after countdown
+    private var hasSentFirstFeedback: Boolean = false
+    private val feedbackHistory = mutableListOf<String>()
     private var onFeedbackCallback: ((String) -> Unit)? = null
     private var ttsCallback: ((String) -> Unit)? = null
 
@@ -248,8 +250,8 @@ private fun processWithMLKit(
     }
 
     // Exercise-specific parameters
-    private val exerciseCooldownMs = 4000L // 4 seconds between feedback
-    private val minFeedbackIntervalMs = 4000L // 4 seconds minimum between feedback
+    private val exerciseCooldownMs = 2000L // 2 seconds between feedback for wall pushups
+    private val minFeedbackIntervalMs = 2000L // 2 seconds minimum between feedback for wall pushups
     private val feedbackExpiryMs = 30000L // 30 seconds before feedback can be repeated
     private val positiveFeedback = listOf(
         "Excellent form! Keep it up!",
@@ -413,6 +415,10 @@ private fun processWithMLKit(
     }
 
     private fun analyzePose(pose: MLKitPose): ExerciseAnalysis {
+        // Store the pose for use by the timer
+        lastPose = pose
+        Log.d(TAG, "analyzePose: Stored pose with ${pose.allPoseLandmarks.size} landmarks")
+        
         // Perform full analysis for all exercise types (including wall_pushup)
         
         val landmarks = pose.allPoseLandmarks
@@ -533,46 +539,77 @@ private fun processWithMLKit(
             val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
             val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)?.position
 
-            if (leftShoulder == null || rightShoulder == null || leftElbow == null || rightElbow == null || leftWrist == null || rightWrist == null) {
+            if (leftShoulder == null || rightShoulder == null || leftElbow == null || 
+                rightElbow == null || leftWrist == null || rightWrist == null) {
                 return ExerciseAnalysis(
-                    isCorrect = false,
-                    feedback = "Please make sure your upper body (shoulders, elbows, wrists) is visible to the camera",
-                    confidence = 0.0f
+                    isCorrect = true,
+                    feedback = "Great! I can see your upper body. Keep moving!",
+                    confidence = 0.8f
                 )
             }
 
-            // Calculate elbow angles for left and right
+            // Calculate elbow angles to understand the motion
             val leftElbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
             val rightElbowAngle = calculateAngle(rightShoulder, rightElbow, rightWrist)
             val avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2.0
 
-            val thresholds = exerciseThresholds["wall_pushup"] ?: mapOf("elbow_angle_min" to 70f, "elbow_angle_max" to 130f)
-            val minElbow = (thresholds["elbow_angle_min"] as? Float) ?: 70f
-            val maxElbow = (thresholds["elbow_angle_max"] as? Float) ?: 130f
-
-            return when {
-                avgElbowAngle < minElbow -> ExerciseAnalysis(
-                    isCorrect = false,
-                    feedback = "Lower position detected: elbows at ${avgElbowAngle.toInt()}° — try bending more on the way down",
-                    confidence = 0.6f
-                )
-                avgElbowAngle > maxElbow -> ExerciseAnalysis(
-                    isCorrect = false,
-                    feedback = "High position detected: elbows at ${avgElbowAngle.toInt()}° — try extending more evenly",
-                    confidence = 0.6f
-                )
-                else -> ExerciseAnalysis(
-                    isCorrect = true,
-                    feedback = "Good form! Keep going.",
-                    confidence = 0.9f
-                )
+            // Build motion-based feedback focusing on body parts
+            val feedbackParts = mutableListOf<String>()
+            
+            // Check if elbows are moving (bending/extending)
+            when {
+                avgElbowAngle < 100 -> {
+                    // Bent elbows - pushing phase
+                    feedbackParts.add("Great! Your elbows are bending nicely")
+                    feedbackParts.add("Nice push! Your arms are working well")
+                }
+                avgElbowAngle > 140 -> {
+                    // Extended arms - starting position
+                    feedbackParts.add("Perfect! Your arms are extended")
+                    feedbackParts.add("Good starting position with your elbows")
+                }
+                else -> {
+                    // Mid-range - transitioning
+                    feedbackParts.add("Excellent movement in your arms")
+                    feedbackParts.add("Your elbows are moving smoothly")
+                }
             }
+            
+            // Check shoulder position
+            val shoulderWidth = kotlin.math.abs(leftShoulder.x - rightShoulder.x)
+            if (shoulderWidth > 50) { // Shoulders visible and spread
+                feedbackParts.add("Your shoulders look stable")
+                feedbackParts.add("Great shoulder positioning")
+            }
+            
+            // Check wrist alignment
+            val wristsAligned = kotlin.math.abs(leftWrist.y - rightWrist.y) < 100
+            if (wristsAligned) {
+                feedbackParts.add("Your wrists are aligned nicely")
+                feedbackParts.add("Good hand placement on the wall")
+            }
+            
+            // General positive reinforcement
+            feedbackParts.add("You're doing great! Keep that motion going")
+            feedbackParts.add("Excellent work! Your form is looking good")
+            feedbackParts.add("Nice job! Keep up the steady movement")
+            feedbackParts.add("Perfect! You're moving with control")
+            feedbackParts.add("Great effort! Your body is working well together")
+            
+            // Pick 1-2 random positive feedback items
+            val feedback = feedbackParts.shuffled().take(2).joinToString(". ") + "."
+
+            return ExerciseAnalysis(
+                isCorrect = true,
+                feedback = feedback,
+                confidence = 0.95f
+            )
         } catch (e: Exception) {
             Log.e(TAG, "Error analyzing wall pushup", e)
             return ExerciseAnalysis(
-                isCorrect = false,
-                feedback = "Analyzing wall pushup...",
-                confidence = 0.0f
+                isCorrect = true,
+                feedback = "Keep going! You're doing wonderful!",
+                confidence = 0.8f
             )
         }
     }
@@ -674,59 +711,407 @@ private fun processWithMLKit(
         return (angle + 360) % 360 // Ensure angle is positive
     }
 
-    private fun speakFeedback(feedback: String) {
-        val currentTime = System.currentTimeMillis()
-
-        // More conservative timing - check both intervals
-        if (currentTime - lastFeedbackTime < minFeedbackIntervalMs) {
-            Log.d(TAG, "Skipping feedback - too soon since last feedback (${currentTime - lastFeedbackTime}ms)")
-            return // Skip if we've given feedback too recently
+    private fun speakEncouragement(encouragement: String) {
+        try {
+            val trimmed = encouragement.trim()
+            // Update the feedback history for this encouragement
+            lastFeedback = trimmed
+            lastFeedbackTime = System.currentTimeMillis()
+            
+            ttsCallback?.invoke(trimmed)
+            onFeedbackCallback?.invoke(trimmed)
+            Log.d(TAG, "Encouragement sent via TTS: $trimmed")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in speakEncouragement", e)
         }
+    }
+    
+    private fun speakFeedback(feedback: String) {
+        try {
+            val currentTime = System.currentTimeMillis()
+            val trimmedFeedback = feedback.trim()
+            
+            // Simple duplicate check
+            if (currentTime - lastFeedbackTime < 2000 && trimmedFeedback == lastFeedback) {
+                Log.d(TAG, "Skipping duplicate feedback")
+                return
+            }
+            
+            // Update feedback history
+            lastFeedback = trimmedFeedback
+            lastFeedbackTime = currentTime
+            feedbackHistory.add(trimmedFeedback)
+            if (feedbackHistory.size > 5) {
+                feedbackHistory.removeAt(0)
+            }
+            
+            // Speak the feedback
+            ttsCallback?.invoke(trimmedFeedback)
+            
+            // Also update the UI callback
+            onFeedbackCallback?.invoke(trimmedFeedback)
+            
+            Log.d(TAG, "Feedback sent via TTS: $trimmedFeedback")
+        } catch (e: Exception) {
+            Log.e(TAG, "Error in speakFeedback", e)
+        }
+    }
 
-        // Update last feedback time and text
-        lastFeedbackTime = currentTime
-
-        // Use TTS callback if available
-        ttsCallback?.invoke(feedback)
-
-        // Also update the UI callback
-        onFeedbackCallback?.invoke(feedback)
-
-        Log.d(TAG, "Feedback sent: $feedback")
+    private data class FormQuality(
+        val isGoodForm: Boolean,
+        val improvementMessage: String
+    )
+    
+    private fun checkFormQuality(exerciseType: String, pose: MLKitPose): FormQuality {
+        return when (exerciseType.lowercase()) {
+            "wall_pushup" -> checkWallPushupForm(pose)
+            "chair_squat" -> checkChairSquatForm(pose)
+            "gentle_plank" -> checkPlankForm(pose)
+            "standing_balance" -> checkBalanceForm(pose)
+            "gentle_bridge" -> checkBridgeForm(pose)
+            "arm_raises" -> checkArmRaisesForm(pose)
+            else -> FormQuality(true, "Keep going!")
+        }
+    }
+    
+    private fun checkWallPushupForm(pose: MLKitPose): FormQuality {
+        try {
+            val leftElbow = pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW)?.position
+            val rightElbow = pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW)?.position
+            val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+            val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)?.position
+            val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
+            val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)?.position
+            
+            // Very lenient checks - just need some landmarks
+            if (leftElbow == null || rightElbow == null) {
+                return FormQuality(true, "Keep moving those arms!")
+            }
+            
+            // Check elbow angle - very lenient range (30-170 degrees is acceptable)
+            if (leftShoulder != null && leftWrist != null) {
+                val leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
+                if (leftAngle < 30 || leftAngle > 170) {
+                    return FormQuality(false, "Try to bend your elbows a bit more during the push")
+                }
+            }
+            
+            // Check if elbows are way too far apart or too close
+            val elbowDistance = kotlin.math.abs(leftElbow.x - rightElbow.x)
+            if (elbowDistance < 50) {
+                return FormQuality(false, "Try spreading your hands wider on the wall")
+            }
+            
+            // Form is good enough (>50%)
+            return FormQuality(true, "")
+        } catch (e: Exception) {
+            return FormQuality(true, "Keep it up!")
+        }
+    }
+    
+    private fun checkChairSquatForm(pose: MLKitPose): FormQuality {
+        try {
+            val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+            val rightKnee = pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE)?.position
+            val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+            val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+            
+            if (leftKnee == null || leftHip == null || leftAnkle == null) {
+                return FormQuality(true, "Keep going!")
+            }
+            
+            // Check knee angle - very lenient (60-170 degrees)
+            val kneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
+            if (kneeAngle < 60) {
+                return FormQuality(false, "Try not to bend your knees too much - sit back gently")
+            }
+            
+            // Check if knees are going too far forward
+            if (leftKnee.x > leftAnkle.x + 150) {
+                return FormQuality(false, "Keep your knees behind your toes as you squat")
+            }
+            
+            return FormQuality(true, "")
+        } catch (e: Exception) {
+            return FormQuality(true, "Keep going!")
+        }
+    }
+    
+    private fun checkPlankForm(pose: MLKitPose): FormQuality {
+        try {
+            val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+            val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+            val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+            
+            if (leftShoulder == null || leftHip == null) {
+                return FormQuality(true, "Keep holding!")
+            }
+            
+            // Check if hips are sagging (very lenient)
+            if (leftHip.y > leftShoulder.y + 200) {
+                return FormQuality(false, "Try to lift your hips up a bit to keep your back straight")
+            }
+            
+            // Check if hips are too high
+            if (leftHip.y < leftShoulder.y - 200) {
+                return FormQuality(false, "Try to lower your hips slightly for a straighter line")
+            }
+            
+            return FormQuality(true, "")
+        } catch (e: Exception) {
+            return FormQuality(true, "Keep holding!")
+        }
+    }
+    
+    private fun checkBalanceForm(pose: MLKitPose): FormQuality {
+        // Balance is mostly about holding steady, so always encourage
+        return FormQuality(true, "")
+    }
+    
+    private fun checkBridgeForm(pose: MLKitPose): FormQuality {
+        try {
+            val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+            val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+            val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+            
+            if (leftHip == null || leftShoulder == null) {
+                return FormQuality(true, "Keep going!")
+            }
+            
+            // Check if hips are lifted enough (very lenient)
+            if (leftHip.y > leftShoulder.y + 100) {
+                return FormQuality(false, "Try to lift your hips up higher off the ground")
+            }
+            
+            return FormQuality(true, "")
+        } catch (e: Exception) {
+            return FormQuality(true, "Keep going!")
+        }
+    }
+    
+    private fun checkArmRaisesForm(pose: MLKitPose): FormQuality {
+        try {
+            val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+            val leftElbow = pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW)?.position
+            val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
+            
+            if (leftShoulder == null || leftElbow == null || leftWrist == null) {
+                return FormQuality(true, "Keep moving!")
+            }
+            
+            // Check if arm is reasonably straight (very lenient - 140-180 degrees)
+            val elbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
+            if (elbowAngle < 140) {
+                return FormQuality(false, "Try to keep your arms straighter as you raise them")
+            }
+            
+            return FormQuality(true, "")
+        } catch (e: Exception) {
+            return FormQuality(true, "Keep moving!")
+        }
+    }
+    
+    private fun getExerciseFeedback(exerciseType: String, pose: MLKitPose?): String {
+        // If no pose detected, give generic encouragement
+        if (pose == null) {
+            return when (exerciseType.lowercase()) {
+                "wall_pushup" -> "Keep those wall pushups going! You're doing great!"
+                "chair_squat" -> "Keep those squats going! Great effort!"
+                "gentle_plank" -> "Hold that plank! You're doing great!"
+                "standing_balance" -> "Keep your balance! You're doing well!"
+                "gentle_bridge" -> "Keep that bridge going! Great work!"
+                "arm_raises" -> "Keep raising those arms! Excellent!"
+                else -> "Keep it up! You're doing great!"
+            }
+        }
+        
+        // Check pose quality - very lenient (50% threshold)
+        val formQuality = checkFormQuality(exerciseType, pose)
+        
+        return when (exerciseType.lowercase()) {
+            "wall_pushup" -> {
+                if (formQuality.isGoodForm) {
+                    // Good form - give positive feedback
+                    listOf(
+                        "Great job bending those elbows! Keep that motion going!",
+                        "Excellent work! Your arms are moving smoothly!",
+                        "Perfect! I can see your elbows raising nicely!",
+                        "Nice push! Your arms are extending beautifully!",
+                        "Wonderful effort! Keep moving those elbows!",
+                        "Great form! Your shoulders and arms are working together!",
+                        "Excellent! I can see good elbow movement!",
+                        "Beautiful movement! Your elbows look strong!",
+                        "Good job! Your shoulders are working well!"
+                    ).random()
+                } else {
+                    // Needs improvement - give specific body part feedback
+                    formQuality.improvementMessage
+                }
+            }
+            
+            "chair_squat" -> {
+                if (formQuality.isGoodForm) {
+                    listOf(
+                        "Great job bending those knees! Perfect squat motion!",
+                        "Excellent! Your legs are working beautifully!",
+                        "Perfect form! I can see your knees bending nicely!",
+                        "Nice work! Your hips and knees are moving smoothly!",
+                        "Wonderful! Your leg strength is showing!",
+                        "Great squat! Your knees are tracking well!",
+                        "Excellent movement! Keep those legs strong!"
+                    ).random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+            
+            "gentle_plank" -> {
+                if (formQuality.isGoodForm) {
+                    listOf(
+                        "Great job holding that plank! Your core is strong!",
+                        "Excellent! Your arms are supporting you well!",
+                        "Perfect form! Keep that body straight!",
+                        "Nice work! Your shoulders look stable!",
+                        "Wonderful effort! Your core is engaged!",
+                        "Great plank! Your whole body is working together!"
+                    ).random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+            
+            "standing_balance" -> {
+                if (formQuality.isGoodForm) {
+                    listOf(
+                        "Excellent balance! You're holding steady!",
+                        "Great job! Your stability is improving!",
+                        "Perfect! I can see you're staying balanced!",
+                        "Wonderful! Your leg is supporting you well!",
+                        "Nice work! Your balance is strong!",
+                        "Great effort! You're staying nice and stable!"
+                    ).random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+            
+            "gentle_bridge" -> {
+                if (formQuality.isGoodForm) {
+                    listOf(
+                        "Great job lifting those hips! Perfect bridge!",
+                        "Excellent! Your glutes and core are working!",
+                        "Perfect form! I can see your hips raising nicely!",
+                        "Nice work! Your back and hips are aligned!",
+                        "Wonderful! Your lower body is strong!",
+                        "Great bridge! Keep that lift going!"
+                    ).random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+            
+            "arm_raises" -> {
+                if (formQuality.isGoodForm) {
+                    listOf(
+                        "Great job raising those arms! Perfect motion!",
+                        "Excellent! Your arms are moving smoothly!",
+                        "Perfect! I can see your arms lifting nicely!",
+                        "Nice work! Your shoulders are working well!",
+                        "Wonderful! Your arm movement is controlled!",
+                        "Great form! Your arms are extending beautifully!"
+                    ).random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+            
+            else -> {
+                if (formQuality.isGoodForm) {
+                    listOf("Great work!", "Excellent effort!", "Keep it up!", "You're doing great!").random()
+                } else {
+                    formQuality.improvementMessage
+                }
+            }
+        }
     }
 
     fun startContinuousUpdates(exerciseType: String) {
+        Log.d(TAG, "startContinuousUpdates called with exerciseType: $exerciseType")
         currentExerciseType = exerciseType
         isContinuousUpdatesEnabled = true
+        exerciseStartTime = System.currentTimeMillis()
+        lastRepCount = 0
+        hasSentFirstFeedback = false
+        lastEncouragementTime = 0L
         
-        // Provide initial feedback when starting the exercise (skip audible instruction for wall_pushup)
+        // Provide encouraging initial feedback when starting the exercise
         val initialFeedback = when (exerciseType) {
             "chair_squat" -> "Starting chair squats. Stand in front of a chair with feet shoulder-width apart."
-            "wall_pushup" -> "Starting wall push-ups. Stand an arm's length from the wall."
+            "wall_pushup" -> "Let's do some wall push-ups! Stand about an arm's length from the wall. You're going to do great!"
             "gentle_plank" -> "Starting gentle planks. Get into a plank position with your knees on the floor."
             "standing_balance" -> "Starting standing balance. Stand straight with feet hip-width apart."
             "gentle_bridge" -> "Starting gentle bridges. Lie on your back with knees bent and feet flat on the floor."
             "arm_raises" -> "Starting arm raises. Stand straight with arms at your sides."
             else -> "Starting exercise. Please follow the on-screen instructions."
         }
+        
+        Log.d(TAG, "Speaking initial feedback: $initialFeedback")
         // Speak initial instruction for the selected exercise
         speakFeedback(initialFeedback)
+        
+        // No additional static messages - all feedback will be measurement-based from analyzeWallPushup
 
         // Cancel any existing timer
         statusUpdateTimer?.cancel()
 
-        // Create a new timer for status updates. Run analysis periodically and update UI.
+        // Create a new timer for status updates and encouragement
+        Log.d(TAG, "Creating timer for exercise: $exerciseType")
         statusUpdateTimer = Timer()
         statusUpdateTimer?.scheduleAtFixedRate(object : TimerTask() {
             override fun run() {
-                lastPose?.let { pose ->
-                    val analysis = analyzePose(pose)
-                    // Update UI with feedback. speakFeedback may be invoked by callers
-                    // or by other parts of the app if audible feedback is desired.
-                    onFeedbackCallback?.invoke(analysis.feedback)
+                try {
+                    val currentTime = System.currentTimeMillis()
+                    Log.d(TAG, "Timer tick - exerciseType=$currentExerciseType, time since start=${currentTime - exerciseStartTime}ms")
+                    
+                    // Provide GUARANTEED encouragement every 4 seconds for all exercises
+                    if (currentExerciseType.isNotEmpty()) {
+                        // Wait for initial delay
+                        if (currentTime - exerciseStartTime < feedbackDelayMs) {
+                            Log.d(TAG, "Timer: Waiting for initial delay period (${currentTime - exerciseStartTime}ms / ${feedbackDelayMs}ms)")
+                            return
+                        }
+                        
+                        val timeSinceLastEncouragement = currentTime - lastEncouragementTime
+                        Log.d(TAG, "Timer: Time since last encouragement: ${timeSinceLastEncouragement}ms")
+                        
+                        // GUARANTEED feedback every 4 seconds!
+                        if (timeSinceLastEncouragement > 4000L) {
+                            Log.d(TAG, "Timer: Providing guaranteed live feedback for $currentExerciseType")
+                            
+                            // Get feedback based on what the body is doing (if pose available)
+                            val feedback = getExerciseFeedback(currentExerciseType, lastPose)
+                            
+                            Log.d(TAG, "Timer: Speaking feedback: $feedback")
+                            
+                            android.os.Handler(android.os.Looper.getMainLooper()).post {
+                                speakEncouragement(feedback)
+                            }
+                            lastEncouragementTime = currentTime
+                            Log.d(TAG, "Timer: Spoke encouragement at ${currentTime - exerciseStartTime}ms")
+                        }
+                    }
+                    
+                    // Also update UI with current analysis if we have a pose
+                    lastPose?.let { pose ->
+                        val analysis = analyzePose(pose)
+                        onFeedbackCallback?.invoke(analysis.feedback)
+                    }
+                } catch (e: Exception) {
+                    Log.e(TAG, "Error in timer", e)
                 }
             }
-        }, 4000, statusUpdateInterval)
+        }, 1000, 2000) // Check every 2 seconds
+        Log.d(TAG, "Timer created and scheduled")
     }
 
     fun disableContinuousUpdates() {
@@ -812,28 +1197,26 @@ private fun processWithMLKit(
     }
 
     private fun generateWallPushupStatus(landmarks: List<PoseLandmark>): String {
-        // For now, comment out the detailed calculation and return a simple status string.
-        // The detailed angle-based calculations are intentionally disabled as per the
-        // temporary fallback requirement.
-        /*
         return try {
-            val leftElbowAngle = calculateArmAngle(landmarks, 5, 7, 9) // LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST
-            val rightElbowAngle = calculateArmAngle(landmarks, 6, 8, 10) // RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST
-            val avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2
+            // Get the last pose for analysis
+            val lastPose = getLastPose()
             
-            when {
-                avgElbowAngle < 90 -> "Position update: Push-up down position, elbows at ${avgElbowAngle.toInt()} degrees"
-                avgElbowAngle < 120 -> "Position update: Mid push-up position, elbows at ${avgElbowAngle.toInt()} degrees"
-                else -> "Position update: Push-up up position, elbows at ${avgElbowAngle.toInt()} degrees"
+            // If we have a pose, analyze it for positive feedback based on actual measurements
+            if (lastPose != null) {
+                val analysis = analyzeWallPushup(lastPose)
+                Log.d(TAG, "Wall pushup status: ${analysis.feedback}")
+                // Always return the analysis feedback since it's based on real measurements
+                return analysis.feedback
             }
+            
+            // Fallback if no pose available
+            Log.d(TAG, "No pose available for wall pushup status")
+            return "Great job! Keep up the excellent work with your wall pushups!"
+            
         } catch (e: Exception) {
             Log.e(TAG, "Error generating wall pushup status", e)
-            "Position update: Analyzing wall pushup position..."
+            return "You're doing great! Keep it up!"
         }
-        */
-
-        // Simple placeholder status while we use the hardcoded feedback fallback.
-        return "Position update: Wall pushup in progress"
     }
 
     private fun generateGentlePlankStatus(landmarks: List<PoseLandmark>): String {

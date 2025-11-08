@@ -176,14 +176,22 @@ class MainActivity : ComponentActivity(), TextToSpeech.OnInitListener {
     }
 
     internal fun beginExerciseAnalysis() {
-        if (isExerciseActive) return
+        Log.d("MainActivity", "beginExerciseAnalysis called. isExerciseActive=$isExerciseActive")
+        if (isExerciseActive) {
+            Log.d("MainActivity", "Exercise already active, returning")
+            return
+        }
         isExerciseActive = true
+        Log.d("MainActivity", "Set isExerciseActive = true")
         exerciseStartTime = System.currentTimeMillis()
         currentExerciseType?.let { type ->
+            Log.d("MainActivity", "Starting continuous updates for exercise: $type")
             if (::poseAnalyzer.isInitialized) {
                 poseAnalyzer.startContinuousUpdates(type)
+            } else {
+                Log.e("MainActivity", "PoseAnalyzer not initialized!")
             }
-        }
+        } ?: Log.e("MainActivity", "currentExerciseType is null!")
     }
 
     internal fun endExerciseSession() {

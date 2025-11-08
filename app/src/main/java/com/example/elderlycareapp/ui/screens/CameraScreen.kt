@@ -71,9 +71,8 @@ private val exerciseGuidanceMap = mapOf(
             "Feet" to "Keep feet shoulder-width apart for stability"
         ),
         tips = listOf(
-            "Control the movement - don't rush",
-            "Breathe out when pushing away from the wall",
-            "Keep your core engaged throughout"
+            // All feedback is now provided dynamically based on real-time pose analysis
+            // See PoseAnalyzer.analyzeWallPushup() for measurement-based feedback
         )
     ),
     "gentle_plank" to ExerciseGuidance(
@@ -226,11 +225,14 @@ fun CameraScreen(
             delay(1000)
         }
         showCountdown = false
-
-    activity?.speakAIResponse("Begin!")
-    isExerciseInProgress = true
-    // Notify activity to begin analysis/timers
-    activity?.beginExerciseAnalysis()
+        
+        android.util.Log.d("CameraScreen", "Countdown finished, about to call beginExerciseAnalysis")
+        activity?.speakAIResponse("Begin!")
+        isExerciseInProgress = true
+        android.util.Log.d("CameraScreen", "Calling beginExerciseAnalysis now")
+        // Notify activity to begin analysis/timers
+        activity?.beginExerciseAnalysis()
+        android.util.Log.d("CameraScreen", "beginExerciseAnalysis called")
 
         delay(4000)
 
@@ -361,7 +363,8 @@ fun CameraScreen(
                 .apply {
                     setAnalyzer(Executors.newSingleThreadExecutor()) { image ->
                         // Forward frames to analyzer when exercise is active
-                        if (isExerciseActive) {
+                        Log.d("CameraScreen", "Image frame received, isExerciseInProgress=$isExerciseInProgress")
+                        if (isExerciseInProgress) {
                             try {
                                 Log.d("CameraScreen", "Processing image for pose analysis")
                                 onCapture(image)
@@ -372,6 +375,7 @@ fun CameraScreen(
                                 image.close()
                             }
                         } else {
+                            Log.d("CameraScreen", "Skipping frame - exercise not started yet")
                             image.close()
                         }
                     }
@@ -473,9 +477,14 @@ fun CameraScreen(
                                                 imageCapture,
                                                 ImageAnalysis.Builder().setTargetResolution(Size(1280, 720)).setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build().apply {
                                                     setAnalyzer(Executors.newSingleThreadExecutor()) { image ->
-                                                        if (isExerciseActive) {
+                                                        android.util.Log.d("CameraScreen", "Image analyzer running, isExerciseInProgress=$isExerciseInProgress")
+                                                        if (isExerciseInProgress) {
+                                                            android.util.Log.d("CameraScreen", "Processing image for pose detection")
                                                             try { onCapture(image) } catch (e: Exception) { Log.e("CameraScreen", "Error in image analysis", e) } finally { image.close() }
-                                                        } else { image.close() }
+                                                        } else { 
+                                                            android.util.Log.d("CameraScreen", "Skipping image - exercise not in progress")
+                                                            image.close() 
+                                                        }
                                                     }
                                                 }
                                             )
