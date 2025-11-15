@@ -486,27 +486,47 @@ private fun processWithMLKit(
             )
         }
 
+        // Get thresholds for chair squat
+        val thresholds = exerciseThresholds["chair_squat"] ?: mapOf()
+        val kneeAngleMin = thresholds["knee_angle_min"] as? Float ?: 80f
+        val kneeAngleMax = thresholds["knee_angle_max"] as? Float ?: 130f
+        val backAngleMax = thresholds["back_angle_max"] as? Float ?: 35f
+        val hipKneeAlignmentThreshold = thresholds["hip_knee_alignment_threshold"] as? Float ?: 0.6f
+
         // Calculate knee angles
         val leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
         val rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle)
         val avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2
+
+        // Check if knee angles are in acceptable range
+        val kneesInRange = avgKneeAngle >= kneeAngleMin && avgKneeAngle <= kneeAngleMax
 
         // Check if knees are tracking over toes
         val leftKneeOverToes = isKneeOverToes(pose, true)
         val rightKneeOverToes = isKneeOverToes(pose, false)
         val kneesAligned = leftKneeOverToes && rightKneeOverToes
 
-        // Check back angle
+        // Check back angle using threshold
         val backAngle = calculateBackAngle(pose)
-        val isBackStraight = backAngle < 20.0 // degrees
+        val isBackStraight = abs(backAngle) < backAngleMax
 
-        // Check hip-knee-ankle alignment
+        // Check hip-knee-ankle alignment using threshold
         val leftHipKneeAnkleAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
         val rightHipKneeAnkleAngle = calculateAngle(rightHip, rightKnee, rightAnkle)
-        val hipsLevel = abs(leftHipKneeAnkleAngle - rightHipKneeAnkleAngle) < 10.0
+        val angleDifference = abs(leftHipKneeAnkleAngle - rightHipKneeAnkleAngle)
+        val hipsLevel = angleDifference < (hipKneeAlignmentThreshold * 100)
 
         // Determine feedback based on analysis
         return when {
+            !kneesInRange -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = if (avgKneeAngle < kneeAngleMin) {
+                    "Don't bend your knees too much - keep them above ${kneeAngleMin.toInt()} degrees"
+                } else {
+                    "Try to bend your knees more - aim for less than ${kneeAngleMax.toInt()} degrees"
+                },
+                confidence = 0.75f
+            )
             !kneesAligned -> ExerciseAnalysis(
                 isCorrect = false,
                 feedback = "Keep your knees aligned over your toes",
@@ -514,17 +534,17 @@ private fun processWithMLKit(
             )
             !isBackStraight -> ExerciseAnalysis(
                 isCorrect = false,
-                feedback = "Keep your back straight and chest up",
+                feedback = "Keep your back straight - it's at ${abs(backAngle).toInt()} degrees, aim for less than ${backAngleMax.toInt()} degrees",
                 confidence = 0.8f
             )
             !hipsLevel -> ExerciseAnalysis(
                 isCorrect = false,
-                feedback = "Keep your hips level and balanced",
+                feedback = "Keep your hips level and balanced - there's a ${angleDifference.toInt()} degree difference",
                 confidence = 0.75f
             )
             else -> ExerciseAnalysis(
                 isCorrect = true,
-                feedback = "Great form! Keep going!",
+                feedback = "Great form! Knee angle: ${avgKneeAngle.toInt()}°, Back angle: ${abs(backAngle).toInt()}°",
                 confidence = 0.9f
             )
         }
@@ -538,6 +558,8 @@ private fun processWithMLKit(
             val rightElbow = pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW)?.position
             val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
             val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)?.position
+            val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+            val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)?.position
 
             if (leftShoulder == null || rightShoulder == null || leftElbow == null || 
                 rightElbow == null || leftWrist == null || rightWrist == null) {
@@ -548,61 +570,99 @@ private fun processWithMLKit(
                 )
             }
 
+            // Get thresholds for wall pushup
+            val thresholds = exerciseThresholds["wall_pushup"] ?: mapOf()
+            val elbowAngleMin = thresholds["elbow_angle_min"] as? Float ?: 70f
+            val elbowAngleMax = thresholds["elbow_angle_max"] as? Float ?: 130f
+            val backAngleMax = thresholds["back_angle_max"] as? Float ?: 15f
+            val shoulderStabilityThreshold = thresholds["shoulder_stability_threshold"] as? Float ?: 0.2f
+
             // Calculate elbow angles to understand the motion
             val leftElbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
             val rightElbowAngle = calculateAngle(rightShoulder, rightElbow, rightWrist)
             val avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2.0
 
-            // Build motion-based feedback focusing on body parts
+            // Check if elbows are in acceptable range
+            val elbowsInRange = avgElbowAngle >= elbowAngleMin && avgElbowAngle <= elbowAngleMax
+            
+            // Check shoulder stability (shoulders should be roughly level)
+            val shoulderHeightDiff = abs(leftShoulder.y - rightShoulder.y)
+            val shoulderWidth = abs(leftShoulder.x - rightShoulder.x)
+            val shoulderStable = shoulderWidth > 0 && (shoulderHeightDiff / shoulderWidth) < shoulderStabilityThreshold
+            
+            // Check back angle if hips are visible
+            var backAngle = 0.0
+            var isBackStraight = true
+            if (leftHip != null && rightHip != null) {
+                val shoulderCenter = PointF(
+                    (leftShoulder.x + rightShoulder.x) / 2,
+                    (leftShoulder.y + rightShoulder.y) / 2
+                )
+                val hipCenter = PointF(
+                    (leftHip.x + rightHip.x) / 2,
+                    (leftHip.y + rightHip.y) / 2
+                )
+                backAngle = abs(Math.toDegrees(
+                    atan2(
+                        (shoulderCenter.x - hipCenter.x).toDouble(),
+                        (shoulderCenter.y - hipCenter.y).toDouble()
+                    )
+                ))
+                isBackStraight = backAngle < backAngleMax
+            }
+
+            // Build feedback based on thresholds
             val feedbackParts = mutableListOf<String>()
+            var isCorrect = true
             
-            // Check if elbows are moving (bending/extending)
-            when {
-                avgElbowAngle < 100 -> {
-                    // Bent elbows - pushing phase
-                    feedbackParts.add("Great! Your elbows are bending nicely")
-                    feedbackParts.add("Nice push! Your arms are working well")
+            // Check elbow angle range
+            if (!elbowsInRange) {
+                isCorrect = false
+                if (avgElbowAngle < elbowAngleMin) {
+                    feedbackParts.add("Your elbows are too bent (${avgElbowAngle.toInt()}°). Try to keep them above ${elbowAngleMin.toInt()}°")
+                } else if (avgElbowAngle > elbowAngleMax) {
+                    feedbackParts.add("Bend your elbows more (${avgElbowAngle.toInt()}°). Aim for less than ${elbowAngleMax.toInt()}°")
                 }
-                avgElbowAngle > 140 -> {
-                    // Extended arms - starting position
-                    feedbackParts.add("Perfect! Your arms are extended")
-                    feedbackParts.add("Good starting position with your elbows")
-                }
-                else -> {
-                    // Mid-range - transitioning
-                    feedbackParts.add("Excellent movement in your arms")
-                    feedbackParts.add("Your elbows are moving smoothly")
+            } else {
+                // Good elbow angle
+                when {
+                    avgElbowAngle < 90 -> feedbackParts.add("Great! Your elbows are bending nicely at ${avgElbowAngle.toInt()}°")
+                    avgElbowAngle > 110 -> feedbackParts.add("Perfect! Your arms are extending well at ${avgElbowAngle.toInt()}°")
+                    else -> feedbackParts.add("Excellent movement! Elbows at ${avgElbowAngle.toInt()}°")
                 }
             }
             
-            // Check shoulder position
-            val shoulderWidth = kotlin.math.abs(leftShoulder.x - rightShoulder.x)
-            if (shoulderWidth > 50) { // Shoulders visible and spread
+            // Check shoulder stability
+            if (!shoulderStable) {
+                isCorrect = false
+                feedbackParts.add("Keep your shoulders level and stable")
+            } else {
                 feedbackParts.add("Your shoulders look stable")
-                feedbackParts.add("Great shoulder positioning")
             }
             
-            // Check wrist alignment
-            val wristsAligned = kotlin.math.abs(leftWrist.y - rightWrist.y) < 100
-            if (wristsAligned) {
-                feedbackParts.add("Your wrists are aligned nicely")
-                feedbackParts.add("Good hand placement on the wall")
+            // Check back angle if available
+            if (!isBackStraight && leftHip != null && rightHip != null) {
+                isCorrect = false
+                feedbackParts.add("Keep your body straighter - back angle is ${backAngle.toInt()}°, aim for less than ${backAngleMax.toInt()}°")
             }
             
-            // General positive reinforcement
-            feedbackParts.add("You're doing great! Keep that motion going")
-            feedbackParts.add("Excellent work! Your form is looking good")
-            feedbackParts.add("Nice job! Keep up the steady movement")
-            feedbackParts.add("Perfect! You're moving with control")
-            feedbackParts.add("Great effort! Your body is working well together")
+            // Add general positive feedback if form is good
+            if (isCorrect) {
+                feedbackParts.add(listOf(
+                    "You're doing great! Keep that motion going",
+                    "Excellent work! Your form is looking good",
+                    "Nice job! Keep up the steady movement",
+                    "Perfect! You're moving with control"
+                ).random())
+            }
             
-            // Pick 1-2 random positive feedback items
-            val feedback = feedbackParts.shuffled().take(2).joinToString(". ") + "."
+            // Pick feedback items (limit to 2-3)
+            val feedback = feedbackParts.take(3).joinToString(". ") + "."
 
             return ExerciseAnalysis(
-                isCorrect = true,
+                isCorrect = isCorrect,
                 feedback = feedback,
-                confidence = 0.95f
+                confidence = 0.85f
             )
         } catch (e: Exception) {
             Log.e(TAG, "Error analyzing wall pushup", e)
@@ -615,39 +675,320 @@ private fun processWithMLKit(
     }
 
     private fun analyzeGentlePlank(pose: MLKitPose): ExerciseAnalysis {
-        // Implementation for gentle plank analysis
-        return ExerciseAnalysis(
-            isCorrect = true,
-            feedback = "Plank form looks good!",
-            confidence = 0.9f
-        )
+        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)?.position
+        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)?.position
+        val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+        val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+
+        if (leftShoulder == null || rightShoulder == null || leftHip == null || rightHip == null) {
+            return ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Please make sure your full body is visible",
+                confidence = 0.0f
+            )
+        }
+
+        // Get thresholds for gentle plank
+        val thresholds = exerciseThresholds["gentle_plank"] ?: mapOf()
+        val spineAngleMin = thresholds["spine_angle_min"] as? Float ?: 150f
+        val spineAngleMax = thresholds["spine_angle_max"] as? Float ?: 210f
+        val hipRatioMin = thresholds["hip_ratio_min"] as? Float ?: 0.4f
+        val hipRatioMax = thresholds["hip_ratio_max"] as? Float ?: 2.2f
+
+        // Calculate spine angle
+        val spineAngle = if (leftKnee != null) {
+            calculateAngle(leftShoulder, leftHip, leftKnee)
+        } else {
+            180.0 // Default to straight if knee not visible
+        }
+
+        // Check if spine angle is in acceptable range
+        val spineAligned = spineAngle >= spineAngleMin && spineAngle <= spineAngleMax
+
+        // Check hip alignment (hips should be roughly level)
+        val hipHeightDiff = abs(leftHip.y - rightHip.y)
+        val shoulderWidth = abs(leftShoulder.x - rightShoulder.x)
+        val hipRatio = if (shoulderWidth > 0) hipHeightDiff / shoulderWidth else 0f
+        val hipsLevel = hipRatio >= hipRatioMin && hipRatio <= hipRatioMax
+
+        // Determine feedback based on analysis
+        return when {
+            !spineAligned -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = if (spineAngle < spineAngleMin) {
+                    "Try to lower your hips slightly - spine angle is ${spineAngle.toInt()}°, aim for above ${spineAngleMin.toInt()}°"
+                } else {
+                    "Try to lift your hips up - spine angle is ${spineAngle.toInt()}°, aim for under ${spineAngleMax.toInt()}°"
+                },
+                confidence = 0.8f
+            )
+            !hipsLevel -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep your hips level - don't let them sag or pike up",
+                confidence = 0.75f
+            )
+            else -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Great plank form! Spine angle: ${spineAngle.toInt()}°",
+                confidence = 0.9f
+            )
+        }
     }
 
     private fun analyzeStandingBalance(pose: MLKitPose): ExerciseAnalysis {
-        // Implementation for standing balance analysis
-        return ExerciseAnalysis(
-            isCorrect = true,
-            feedback = "Great balance! Keep it up!",
-            confidence = 0.9f
-        )
+        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)?.position
+        val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+        val rightKnee = pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE)?.position
+        val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+        val rightAnkle = pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE)?.position
+        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)?.position
+
+        if (leftHip == null || rightHip == null || leftAnkle == null || rightAnkle == null) {
+            return ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Please make sure your full body is visible",
+                confidence = 0.0f
+            )
+        }
+
+        // Get thresholds for standing balance
+        val thresholds = exerciseThresholds["standing_balance"] ?: mapOf()
+        val footWidthMin = thresholds["foot_width_min"] as? Float ?: 0.7f
+        val footWidthMax = thresholds["foot_width_max"] as? Float ?: 1.4f
+        val kneeAngleMin = thresholds["knee_angle_min"] as? Float ?: 165f
+        val kneeAngleMax = thresholds["knee_angle_max"] as? Float ?: 195f
+        val balanceThreshold = thresholds["balance_threshold"] as? Float ?: 0.3f
+
+        // Calculate foot width ratio
+        val hipWidth = abs(leftHip.x - rightHip.x)
+        val ankleWidth = abs(leftAnkle.x - rightAnkle.x)
+        val footWidthRatio = if (hipWidth > 0) ankleWidth / hipWidth else 1.0f
+
+        // Check if foot width is in acceptable range
+        val feetPositioned = footWidthRatio >= footWidthMin && footWidthRatio <= footWidthMax
+
+        // Calculate knee angles if available
+        var kneesAligned = true
+        if (leftKnee != null && rightKnee != null) {
+            val leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
+            val rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle)
+            val avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2
+            kneesAligned = avgKneeAngle >= kneeAngleMin && avgKneeAngle <= kneeAngleMax
+        }
+
+        // Check body balance (shoulders over hips)
+        var bodyBalanced = true
+        if (leftShoulder != null && rightShoulder != null) {
+            val shoulderCenter = (leftShoulder.x + rightShoulder.x) / 2
+            val hipCenter = (leftHip.x + rightHip.x) / 2
+            val balanceOffset = abs(shoulderCenter - hipCenter)
+            bodyBalanced = balanceOffset < (hipWidth * balanceThreshold)
+        }
+
+        // Determine feedback based on analysis
+        return when {
+            !feetPositioned -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = if (footWidthRatio < footWidthMin) {
+                    "Widen your stance slightly for better balance"
+                } else {
+                    "Bring your feet a bit closer together"
+                },
+                confidence = 0.75f
+            )
+            !kneesAligned -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep a slight bend in your standing knee for stability",
+                confidence = 0.8f
+            )
+            !bodyBalanced -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep your upper body centered over your hips for balance",
+                confidence = 0.75f
+            )
+            else -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Excellent balance! Your stance is stable",
+                confidence = 0.9f
+            )
+        }
     }
 
     private fun analyzeGentleBridge(pose: MLKitPose): ExerciseAnalysis {
-        // Implementation for gentle bridge analysis
-        return ExerciseAnalysis(
-            isCorrect = true,
-            feedback = "Bridge form looks good!",
-            confidence = 0.9f
-        )
+        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)?.position
+        val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+        val rightKnee = pose.getPoseLandmark(PoseLandmark.RIGHT_KNEE)?.position
+        val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+        val rightAnkle = pose.getPoseLandmark(PoseLandmark.RIGHT_ANKLE)?.position
+        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)?.position
+
+        if (leftHip == null || rightHip == null || leftKnee == null || rightKnee == null || 
+            leftAnkle == null || rightAnkle == null || leftShoulder == null || rightShoulder == null) {
+            return ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Please make sure your full body is visible",
+                confidence = 0.0f
+            )
+        }
+
+        // Get thresholds for gentle bridge
+        val thresholds = exerciseThresholds["gentle_bridge"] ?: mapOf()
+        val kneeAngleMin = thresholds["knee_angle_min"] as? Float ?: 80f
+        val kneeAngleMax = thresholds["knee_angle_max"] as? Float ?: 130f
+        val hipExtensionMin = thresholds["hip_extension_min"] as? Float ?: 0.05f
+        val hipExtensionMax = thresholds["hip_extension_max"] as? Float ?: 0.4f
+        val hipLevelThreshold = thresholds["hip_level_threshold"] as? Float ?: 0.15f
+
+        // Calculate knee angles
+        val leftKneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
+        val rightKneeAngle = calculateAngle(rightHip, rightKnee, rightAnkle)
+        val avgKneeAngle = (leftKneeAngle + rightKneeAngle) / 2
+
+        // Check if knee angles are in acceptable range
+        val kneesAligned = avgKneeAngle >= kneeAngleMin && avgKneeAngle <= kneeAngleMax
+
+        // Calculate hip extension (how high hips are lifted)
+        val shoulderHeight = (leftShoulder.y + rightShoulder.y) / 2
+        val hipHeight = (leftHip.y + rightHip.y) / 2
+        val kneeHeight = (leftKnee.y + rightKnee.y) / 2
+        val bodyLength = abs(shoulderHeight - kneeHeight)
+        val hipExtension = if (bodyLength > 0) (shoulderHeight - hipHeight) / bodyLength else 0f
+        val hipsLifted = hipExtension >= hipExtensionMin && hipExtension <= hipExtensionMax
+
+        // Check if hips are level
+        val hipHeightDiff = abs(leftHip.y - rightHip.y)
+        val hipWidth = abs(leftHip.x - rightHip.x)
+        val hipLevelRatio = if (hipWidth > 0) hipHeightDiff / hipWidth else 0f
+        val hipsLevel = hipLevelRatio < hipLevelThreshold
+
+        // Determine feedback based on analysis
+        return when {
+            !kneesAligned -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = if (avgKneeAngle < kneeAngleMin) {
+                    "Your knees are too bent (${avgKneeAngle.toInt()}°) - straighten them slightly (aim for above ${kneeAngleMin.toInt()}°)"
+                } else {
+                    "Bend your knees more (${avgKneeAngle.toInt()}°) - aim for under ${kneeAngleMax.toInt()}°"
+                },
+                confidence = 0.75f
+            )
+            !hipsLifted -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = if (hipExtension < hipExtensionMin) {
+                    "Lift your hips higher off the ground"
+                } else {
+                    "Lower your hips slightly - don't overextend your back"
+                },
+                confidence = 0.8f
+            )
+            !hipsLevel -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep your hips level - don't let one side drop",
+                confidence = 0.75f
+            )
+            else -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Perfect bridge form! Knee angle: ${avgKneeAngle.toInt()}°",
+                confidence = 0.9f
+            )
+        }
     }
 
     private fun analyzeArmRaises(pose: MLKitPose): ExerciseAnalysis {
-        // Implementation for arm raises analysis
-        return ExerciseAnalysis(
-            isCorrect = true,
-            feedback = "Arm raise form looks good!",
-            confidence = 0.9f
-        )
+        val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+        val rightShoulder = pose.getPoseLandmark(PoseLandmark.RIGHT_SHOULDER)?.position
+        val leftElbow = pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW)?.position
+        val rightElbow = pose.getPoseLandmark(PoseLandmark.RIGHT_ELBOW)?.position
+        val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
+        val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)?.position
+        val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
+        val rightHip = pose.getPoseLandmark(PoseLandmark.RIGHT_HIP)?.position
+
+        if (leftShoulder == null || rightShoulder == null || leftElbow == null || 
+            rightElbow == null || leftWrist == null || rightWrist == null) {
+            return ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Please make sure your upper body is visible",
+                confidence = 0.0f
+            )
+        }
+
+        // Get thresholds for arm raises
+        val thresholds = exerciseThresholds["arm_raises"] ?: mapOf()
+        val armAngleMin = thresholds["arm_angle_min"] as? Float ?: 140f
+        val armAngleMax = thresholds["arm_angle_max"] as? Float ?: 185f
+        val elbowAngleMin = thresholds["elbow_angle_min"] as? Float ?: 150f
+        val shoulderElevationMax = thresholds["shoulder_elevation_max"] as? Float ?: 15f
+        val armSymmetryThreshold = thresholds["arm_symmetry_threshold"] as? Float ?: 0.25f
+
+        // Calculate elbow angles (arms should be relatively straight)
+        val leftElbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
+        val rightElbowAngle = calculateAngle(rightShoulder, rightElbow, rightWrist)
+        val avgElbowAngle = (leftElbowAngle + rightElbowAngle) / 2
+
+        // Check if elbows are straight enough
+        val elbowsStraight = avgElbowAngle >= elbowAngleMin
+
+        // Calculate arm heights (how high the arms are raised)
+        val leftArmHeight = leftShoulder.y - leftWrist.y
+        val rightArmHeight = rightShoulder.y - rightWrist.y
+        val avgArmHeight = (leftArmHeight + rightArmHeight) / 2
+
+        // Check arm symmetry (arms should be at similar heights)
+        val armHeightDiff = abs(leftArmHeight - rightArmHeight)
+        val shoulderWidth = abs(leftShoulder.x - rightShoulder.x)
+        val armSymmetry = if (shoulderWidth > 0) armHeightDiff / shoulderWidth else 0f
+        val armsSymmetric = armSymmetry < armSymmetryThreshold
+
+        // Check if shoulders are relaxed (not elevated)
+        var shouldersRelaxed = true
+        if (leftHip != null && rightHip != null) {
+            val shoulderHeight = (leftShoulder.y + rightShoulder.y) / 2
+            val hipHeight = (leftHip.y + rightHip.y) / 2
+            val bodyHeight = abs(hipHeight - shoulderHeight)
+            val shoulderElevation = if (bodyHeight > 0) (leftShoulder.y - rightShoulder.y) / bodyHeight else 0f
+            shouldersRelaxed = abs(shoulderElevation) < shoulderElevationMax
+        }
+
+        // Determine feedback based on analysis
+        return when {
+            !elbowsStraight -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep your arms straighter - elbow angle is ${avgElbowAngle.toInt()}°, aim for above ${elbowAngleMin.toInt()}°",
+                confidence = 0.75f
+            )
+            !armsSymmetric -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep both arms at the same height as you raise them",
+                confidence = 0.8f
+            )
+            !shouldersRelaxed -> ExerciseAnalysis(
+                isCorrect = false,
+                feedback = "Keep your shoulders down and relaxed - don't let them creep up to your ears",
+                confidence = 0.75f
+            )
+            avgArmHeight > 100 -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Excellent! Your arms are raised high with good form",
+                confidence = 0.9f
+            )
+            avgArmHeight > 50 -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Good! Your arms are at shoulder level with straight elbows",
+                confidence = 0.85f
+            )
+            else -> ExerciseAnalysis(
+                isCorrect = true,
+                feedback = "Keep going! Raise your arms higher",
+                confidence = 0.8f
+            )
+        }
     }
 
     private fun isBackStraight(pose: MLKitPose): Boolean {
@@ -783,16 +1124,23 @@ private fun processWithMLKit(
             val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
             val rightWrist = pose.getPoseLandmark(PoseLandmark.RIGHT_WRIST)?.position
             
+            // Get thresholds
+            val thresholds = exerciseThresholds["wall_pushup"] ?: mapOf()
+            val elbowAngleMin = thresholds["elbow_angle_min"] as? Float ?: 70f
+            val elbowAngleMax = thresholds["elbow_angle_max"] as? Float ?: 130f
+            
             // Very lenient checks - just need some landmarks
             if (leftElbow == null || rightElbow == null) {
                 return FormQuality(true, "Keep moving those arms!")
             }
             
-            // Check elbow angle - very lenient range (30-170 degrees is acceptable)
+            // Check elbow angle using thresholds
             if (leftShoulder != null && leftWrist != null) {
                 val leftAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
-                if (leftAngle < 30 || leftAngle > 170) {
-                    return FormQuality(false, "Try to bend your elbows a bit more during the push")
+                if (leftAngle < elbowAngleMin) {
+                    return FormQuality(false, "Try not to bend your elbows too much - keep them above ${elbowAngleMin.toInt()} degrees")
+                } else if (leftAngle > elbowAngleMax) {
+                    return FormQuality(false, "Try to bend your elbows a bit more during the push - aim for under ${elbowAngleMax.toInt()} degrees")
                 }
             }
             
@@ -816,14 +1164,21 @@ private fun processWithMLKit(
             val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
             val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
             
+            // Get thresholds
+            val thresholds = exerciseThresholds["chair_squat"] ?: mapOf()
+            val kneeAngleMin = thresholds["knee_angle_min"] as? Float ?: 80f
+            val kneeAngleMax = thresholds["knee_angle_max"] as? Float ?: 130f
+            
             if (leftKnee == null || leftHip == null || leftAnkle == null) {
                 return FormQuality(true, "Keep going!")
             }
             
-            // Check knee angle - very lenient (60-170 degrees)
+            // Check knee angle using thresholds
             val kneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
-            if (kneeAngle < 60) {
-                return FormQuality(false, "Try not to bend your knees too much - sit back gently")
+            if (kneeAngle < kneeAngleMin) {
+                return FormQuality(false, "Try not to bend your knees too much - keep them above ${kneeAngleMin.toInt()} degrees")
+            } else if (kneeAngle > kneeAngleMax) {
+                return FormQuality(false, "Try bending your knees more - aim for under ${kneeAngleMax.toInt()} degrees")
             }
             
             // Check if knees are going too far forward
@@ -842,19 +1197,33 @@ private fun processWithMLKit(
             val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
             val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
             val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
+            val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+            
+            // Get thresholds
+            val thresholds = exerciseThresholds["gentle_plank"] ?: mapOf()
+            val spineAngleMin = thresholds["spine_angle_min"] as? Float ?: 150f
+            val spineAngleMax = thresholds["spine_angle_max"] as? Float ?: 210f
             
             if (leftShoulder == null || leftHip == null) {
                 return FormQuality(true, "Keep holding!")
             }
             
-            // Check if hips are sagging (very lenient)
-            if (leftHip.y > leftShoulder.y + 200) {
-                return FormQuality(false, "Try to lift your hips up a bit to keep your back straight")
-            }
-            
-            // Check if hips are too high
-            if (leftHip.y < leftShoulder.y - 200) {
-                return FormQuality(false, "Try to lower your hips slightly for a straighter line")
+            // Calculate spine angle if we have all landmarks
+            if (leftKnee != null) {
+                val spineAngle = calculateAngle(leftShoulder, leftHip, leftKnee)
+                if (spineAngle < spineAngleMin) {
+                    return FormQuality(false, "Try to lower your hips slightly - spine angle is ${spineAngle.toInt()}°, aim for above ${spineAngleMin.toInt()}°")
+                } else if (spineAngle > spineAngleMax) {
+                    return FormQuality(false, "Try to lift your hips up a bit - spine angle is ${spineAngle.toInt()}°, aim for under ${spineAngleMax.toInt()}°")
+                }
+            } else {
+                // Fallback to simple Y-coordinate checks if knee not visible
+                if (leftHip.y > leftShoulder.y + 200) {
+                    return FormQuality(false, "Try to lift your hips up a bit to keep your back straight")
+                }
+                if (leftHip.y < leftShoulder.y - 200) {
+                    return FormQuality(false, "Try to lower your hips slightly for a straighter line")
+                }
             }
             
             return FormQuality(true, "")
@@ -873,9 +1242,27 @@ private fun processWithMLKit(
             val leftHip = pose.getPoseLandmark(PoseLandmark.LEFT_HIP)?.position
             val leftKnee = pose.getPoseLandmark(PoseLandmark.LEFT_KNEE)?.position
             val leftShoulder = pose.getPoseLandmark(PoseLandmark.LEFT_SHOULDER)?.position
+            val leftAnkle = pose.getPoseLandmark(PoseLandmark.LEFT_ANKLE)?.position
+            
+            // Get thresholds
+            val thresholds = exerciseThresholds["gentle_bridge"] ?: mapOf()
+            val kneeAngleMin = thresholds["knee_angle_min"] as? Float ?: 80f
+            val kneeAngleMax = thresholds["knee_angle_max"] as? Float ?: 130f
+            val hipExtensionMin = thresholds["hip_extension_min"] as? Float ?: 0.05f
+            val hipExtensionMax = thresholds["hip_extension_max"] as? Float ?: 0.4f
             
             if (leftHip == null || leftShoulder == null) {
                 return FormQuality(true, "Keep going!")
+            }
+            
+            // Check knee angle if available
+            if (leftKnee != null && leftAnkle != null) {
+                val kneeAngle = calculateAngle(leftHip, leftKnee, leftAnkle)
+                if (kneeAngle < kneeAngleMin) {
+                    return FormQuality(false, "Your knees are too bent - try straightening them a bit (aim for above ${kneeAngleMin.toInt()}°)")
+                } else if (kneeAngle > kneeAngleMax) {
+                    return FormQuality(false, "Bend your knees a bit more (aim for under ${kneeAngleMax.toInt()}°)")
+                }
             }
             
             // Check if hips are lifted enough (very lenient)
@@ -895,14 +1282,19 @@ private fun processWithMLKit(
             val leftElbow = pose.getPoseLandmark(PoseLandmark.LEFT_ELBOW)?.position
             val leftWrist = pose.getPoseLandmark(PoseLandmark.LEFT_WRIST)?.position
             
+            // Get thresholds
+            val thresholds = exerciseThresholds["arm_raises"] ?: mapOf()
+            val elbowAngleMin = thresholds["elbow_angle_min"] as? Float ?: 150f
+            val armAngleMin = thresholds["arm_angle_min"] as? Float ?: 140f
+            
             if (leftShoulder == null || leftElbow == null || leftWrist == null) {
                 return FormQuality(true, "Keep moving!")
             }
             
-            // Check if arm is reasonably straight (very lenient - 140-180 degrees)
+            // Check if arm is reasonably straight using threshold
             val elbowAngle = calculateAngle(leftShoulder, leftElbow, leftWrist)
-            if (elbowAngle < 140) {
-                return FormQuality(false, "Try to keep your arms straighter as you raise them")
+            if (elbowAngle < elbowAngleMin) {
+                return FormQuality(false, "Try to keep your arms straighter as you raise them - aim for above ${elbowAngleMin.toInt()}°")
             }
             
             return FormQuality(true, "")
